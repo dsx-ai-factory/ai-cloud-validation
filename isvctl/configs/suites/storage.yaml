@@ -23,8 +23,9 @@
 # right fields, the validations pass regardless of which cloud you use.
 #
 # Scope: persistent block storage (EBS-style volumes), home-directory
-# NFS storage, and high-speed storage (SDS controller + parallel file
-# system). Object storage and other checks can land here later.
+# NFS storage, high-speed storage (SDS controller + parallel file
+# system), and storage performance (opt-in; see the Performance group).
+# Object storage and other checks can land here later.
 # High-speed check classes / test_ids keep the HSS* / HSS## naming from
 # the offtake High-Speed Storage requirement family
 # (docs/requirements/offtake-requirements.md).
@@ -547,6 +548,92 @@ tests:
           # tests_subdir: ""  # optional: scope to a single tests/ subdir (e.g. "chmod")
           namespace_prefix: "isvtest-fs-posix"
           timeout: 3600
+
+    # ─── Performance (storage-scale-test sweep) ──────────────────────
+    # Bound to steps that only an opt-in command overlay supplies (my-isv:
+    # config/overlays/storage-perf.yaml), so a plain storage run skips them as
+    # step_not_configured and needs no performance inputs. Load the overlay after
+    # the provider's storage.yaml and select --label performance. The sweep runs
+    # storage-scale-test (vendored by `make vendor-storage-scale-test`) through the
+    # shared scripts in ../shared/storage/perf/; a provider implements only the
+    # filesystem and claim fixtures. A pass means the sweep completed and reported
+    # real numbers; floors default to 0 (report only).
+    # test_ids (SPERF*) are placeholders mapped to the placeholder requirements in
+    # docs/requirements/storage-performance-requirements.yaml; replace both when the
+    # official requirements and test list are onboarded.
+    perf_filesystem:
+      step: create_perf_filesystem
+      checks:
+        StoragePerfFilesystemCreatedCheck:
+          test_id: "SPERF01-01"
+          labels: ["kubernetes", "performance", "storage"]
+          requires: [kubernetes]
+          description: "Check the provider created (or supplied) the filesystem for the performance sweep"
+          compose:
+            - StepSuccessCheck
+            - FieldExistsCheck:
+                fields: ["filesystem_id"]
+
+    perf_storage:
+      step: provision_perf_storage
+      checks:
+        StoragePerfClaimProvidedCheck:
+          test_id: "SPERF02-01"
+          labels: ["kubernetes", "performance", "storage"]
+          requires: [kubernetes]
+          description: "Check the provider exposed the filesystem as a claim for the performance sweep"
+          compose:
+            - StepSuccessCheck
+            - FieldExistsCheck:
+                fields: ["namespace", "claim_name"]
+
+    perf_sweep:
+      step: run_storage_test
+      checks:
+        StoragePerfSweepCompletedCheck:
+          test_id: "SPERF03-01"
+          labels: ["kubernetes", "performance", "storage"]
+          requires: [kubernetes]
+          description: "Check the storage-scale-test sweep ran to completion and was collected"
+          compose:
+            - StepSuccessCheck
+            - FieldValueCheck:
+                field: "state"
+                expected: "SUCCESS"
+
+    # Bound to the teardown step, not run_storage_test: it reports whether the sweep was
+    # released whoever released it, including when run_storage_test was killed and
+    # recorded no output.
+    perf_release:
+      step: release_storage_test
+      checks:
+        StoragePerfSweepReleasedCheck:
+          test_id: "SPERF05-01"
+          labels: ["kubernetes", "performance", "storage"]
+          requires: [kubernetes]
+          description: "Check the sweep released its Lease, coordinator Job and worker DaemonSet"
+          compose:
+            - FieldValueCheck:
+                field: "released"
+                expected: true
+
+    # Classes (validations/storage_perf.py), not composites, so the report shows the
+    # measured numbers even when floors are 0 (report only).
+    perf_results:
+      step: evaluate_storage_test
+      checks:
+        StoragePerfResultsPresentCheck:
+          test_id: "SPERF07-01"
+          labels: ["kubernetes", "performance", "storage"]
+          requires: [kubernetes]
+        StoragePerfBandwidthFloorCheck:
+          test_id: "SPERF08-01"
+          labels: ["kubernetes", "performance", "storage"]
+          requires: [kubernetes]
+        StoragePerfIopsFloorCheck:
+          test_id: "SPERF08-02"
+          labels: ["kubernetes", "performance", "storage"]
+          requires: [kubernetes]
 
     # ─── Teardown tests ──────────────────────────────────────────────
     teardown_checks:

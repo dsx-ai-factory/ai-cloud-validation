@@ -3801,4 +3801,67 @@ docs/requirements/test-requirements-matrix.yaml. Run `make plan` to regenerate.
 | partial
 | Corroborates supplied provisioning ranges and fresh allocations; does not prove cluster reconfiguration or provider network range APIs.
 
+| [[SPERF01-01]]SPERF01-01
+| Data Services
+| Storage Performance
+| Verify the provider creates (or supplies) the high-speed filesystem under test
+| SPERF01
+| storage-perf-prd
+| full
+|
+
+| [[SPERF02-01]]SPERF02-01
+| Data Services
+| Storage Performance
+| Verify the filesystem is exposed to the cluster as a Bound ReadWriteMany claim
+| SPERF02
+| storage-perf-prd
+| full
+|
+
+| [[SPERF03-01]]SPERF03-01
+| Data Services
+| Storage Performance
+| Verify a storage-scale-test IO sweep runs to completion against the claim
+| SPERF03
+| storage-perf-prd
+| full
+|
+
+| [[SPERF05-01]]SPERF05-01
+| Data Services
+| Storage Performance
+| Verify the sweep releases every cluster resource it held
+| SPERF05
+| storage-perf-prd
+| partial
+|
+
+| [[SPERF07-01]]SPERF07-01
+| Data Services
+| Storage Performance
+| Verify the sweep reports complete write and read results
+| SPERF07
+| storage-perf-prd
+| full
+|
+
+| [[SPERF08-01]]SPERF08-01
+| Data Services
+| Storage Performance
+| Verify measured bandwidth meets the configured floor
+| SPERF08
+| storage-perf-prd
+| full
+|
+
+| [[SPERF08-02]]SPERF08-02
+| Data Services
+| Storage Performance
+| Verify measured IOPS meets the configured floor
+| SPERF08
+| storage-perf-prd
+| full
+|
+
 |===

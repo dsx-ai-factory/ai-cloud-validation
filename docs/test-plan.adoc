@@ -2687,7 +2687,7 @@ a| https://github.com/dsx-ai-factory/ai-cloud-validation/issues/215[#215]
 | pending
 |
 
-.57+| Data Services
+.64+| Data Services
 .34+| SDS Controller
 .19+| Manages software-defined storage services and policies. Orchestrates provisioning, tiers, and resiliency.
 .19+| AWS: EBS + FSx backend control planes
@@ -3441,6 +3441,114 @@ a| https://github.com/dsx-ai-factory/ai-cloud-validation/issues/504[#504]
 |
 | Verify required vendor/DKMS kernel modules are installed on all GPU and CPU nodes
 | published
+|
+
+.7+| Storage Performance
+.7+| IO benchmark sweep (storage-scale-test) against a provider filesystem, reporting real bandwidth, IOPS and latency
+.7+| storage-scale-test elbencho sweep on Kubernetes
+| [[SPERF01-01]]SPERF01-01
+| SPERF01
+|
+| kubernetes, performance, storage
+| tenant
+| Placeholder id; replace when the official storage performance requirements and test list are onboarded.
+| P1
+a|
+|
+|
+|
+| Verify the provider creates (or supplies) the high-speed filesystem under test
+| pending
+|
+
+| [[SPERF02-01]]SPERF02-01
+| SPERF02
+|
+| kubernetes, performance, storage
+| tenant
+| Placeholder id; replace when the official storage performance requirements and test list are onboarded.
+| P1
+a|
+|
+|
+|
+| Verify the filesystem is exposed to the cluster as a Bound ReadWriteMany claim
+| pending
+|
+
+| [[SPERF03-01]]SPERF03-01
+| SPERF03
+|
+| kubernetes, performance, storage
+| tenant
+| Placeholder id; replace when the official storage performance requirements and test list are onboarded.
+| P1
+a|
+|
+|
+|
+| Verify a storage-scale-test IO sweep runs to completion against the claim
+| pending
+|
+
+| [[SPERF05-01]]SPERF05-01
+| SPERF05
+|
+| kubernetes, performance, storage
+| tenant
+| Placeholder id; replace when the official storage performance requirements and test list are onboarded.
+| P1
+a|
+|
+|
+|
+| Verify the sweep releases every cluster resource it held
+| pending
+|
+
+| [[SPERF07-01]]SPERF07-01
+| SPERF07
+|
+| kubernetes, performance, storage
+| tenant
+| Placeholder id; replace when the official storage performance requirements and test list are onboarded.
+| P1
+a|
+|
+|
+|
+| Verify the sweep reports complete write and read results
+| pending
+|
+
+| [[SPERF08-01]]SPERF08-01
+| SPERF08
+|
+| kubernetes, performance, storage
+| tenant
+| Placeholder id; replace when the official storage performance requirements and test list are onboarded.
+| P1
+a|
+|
+|
+|
+| Verify measured bandwidth meets the configured floor
+| pending
+|
+
+| [[SPERF08-02]]SPERF08-02
+| SPERF08
+|
+| kubernetes, performance, storage
+| tenant
+| Placeholder id; replace when the official storage performance requirements and test list are onboarded.
+| P1
+a|
+|
+|
+|
+| Verify measured IOPS meets the configured floor
+| pending
 |
 
 | Object Storage Service

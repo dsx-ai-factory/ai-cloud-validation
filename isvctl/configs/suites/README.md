@@ -330,6 +330,23 @@ volume. The three test-phase steps all reuse that fixture.
 | `teardown_volume` | teardown | `providers/my-isv/scripts/storage/teardown_volume.py` | `resources_deleted`, `message` |
 | `teardown` | teardown | `providers/my-isv/scripts/vm/teardown.py` | `resources_deleted`, `message` (reuses VM script) |
 
+**Performance (opt-in).** The Performance group's checks bind to steps that only the
+command overlay `providers/my-isv/config/overlays/storage-perf.yaml` supplies (load it after
+`storage.yaml`, with `--capability kubernetes --label performance`). The benchmark steps are
+shared; a provider writes only the four fixture scripts. Every step's output has a
+`storage_perf_*` schema. See [Storage Performance](../../../docs/guides/storage-performance.md).
+
+| Step | Phase | Script | Key JSON Fields |
+|------|-------|--------|-----------------|
+| `find_storage_scale_test` | setup | `shared/storage/perf/find_storage_scale_test.py` | `scale_test_base`, `version` |
+| `create_perf_filesystem` | setup | `providers/my-isv/scripts/storage/create_perf_filesystem.py` | `filesystem_id`, `created` |
+| `provision_perf_storage` | setup | `providers/my-isv/scripts/storage/provision_perf_storage.py` | `namespace`, `claim_name`, `created` |
+| `run_storage_test` | test | `shared/storage/perf/run_storage_test.py` | `state`, `results_dir`, `executions`, `resources_released` |
+| `evaluate_storage_test` | test | `shared/storage/perf/evaluate_storage_test.py` | `headline`, `tests.{results_present,bandwidth_meets_min,iops_meets_min}` |
+| `release_storage_test` | teardown | `shared/storage/perf/release_storage_test.py` | `released` |
+| `deprovision_perf_storage` | teardown | `providers/my-isv/scripts/storage/deprovision_perf_storage.py` | `deleted`, `resources_deleted`, `message` |
+| `delete_perf_filesystem` | teardown | `providers/my-isv/scripts/storage/delete_perf_filesystem.py` | `deleted`, `resources_deleted`, `message` |
+
 ### Kubernetes (`k8s.yaml`)
 
 | Step | Phase | Script |

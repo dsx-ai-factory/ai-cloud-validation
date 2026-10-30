@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Performance fixture: create the filesystem the storage-scale-test sweep runs against.
+
+Provider-agnostic template - replace the TODO block with your platform's storage API calls.
+Called first in the setup phase of config/overlays/storage-perf.yaml (SPERF01). Unlike the
+self-contained HSS scripts this is a fixture: the filesystem stays up for the sweep,
+provision_perf_storage exposes it to the cluster as a claim, and delete_perf_filesystem
+removes it in teardown.
+
+Create the high-speed filesystem (or find an existing one), wait until it is ready to mount,
+and make it reachable from the cluster nodes the sweep will use. Reusing an existing
+filesystem is fine: report "created": false and teardown leaves it alone. With --record the
+result is also written to that file, so a teardown run on its own (`--phase teardown`, which
+has no setup outputs) still knows what to delete.
+
+Required JSON output fields:
+  success        (bool) - true once the filesystem is ready to mount
+  platform       (str)  - "storage"
+  test_name      (str)  - "create_perf_filesystem"
+  filesystem_id  (str)  - identifier of the filesystem (consumed by later steps)
+  capacity_gib   (int)  - its capacity
+  created        (bool) - true if this run created it (teardown deletes only those)
+
+Usage:
+    python create_perf_filesystem.py --name isv-storage-perf --capacity-gib 1200 [--record <path>]
+"""
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+# ISVCTL_DEMO_MODE=1 enables demo-success output (used by `make demo-test`).
+DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
+
+
+def main() -> int:
+    """Create (or find) the performance filesystem; print JSON."""
+    parser = argparse.ArgumentParser(description="Performance fixture: create the filesystem")
+    parser.add_argument("--name", default="isv-storage-perf", help="Name for the filesystem")
+    parser.add_argument("--capacity-gib", type=int, default=1200, help="Capacity to provision")
+    parser.add_argument("--record", default="", help="File to record the result in for teardown")
+    args = parser.parse_args()
+
+    result: dict[str, Any] = {
+        "success": False,
+        "platform": "storage",
+        "test_name": "create_perf_filesystem",
+        "filesystem_id": "",
+        "capacity_gib": args.capacity_gib,
+        "created": False,
+    }
+
+    # ╔══════════════════════════════════════════════════════════════════╗
+    # ║  TODO: Replace this block with your platform's implementation     ║
+    # ║                                                                   ║
+    # ║  1. CreateFilesystem(args.name, args.capacity_gib), or find an    ║
+    # ║     existing one to reuse                                         ║
+    # ║  2. Wait until it is available and mountable from the cluster     ║
+    # ║  3. result["filesystem_id"] = filesystem_id                       ║
+    # ║  4. result["created"] = True only if this run created it          ║
+    # ║  5. result["success"] = True                                      ║
+    # ╚══════════════════════════════════════════════════════════════════╝
+
+    if DEMO_MODE:
+        result.update({"success": True, "filesystem_id": "demo-perf-fs", "created": True})
+    else:
+        result["error"] = "Not implemented - create the filesystem for the performance sweep"
+
+    if result["success"] and args.record:
+        Path(args.record).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.record).write_text(json.dumps(result), encoding="utf-8")
+    print(json.dumps(result, indent=2))
+    return 0 if result["success"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

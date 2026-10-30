@@ -2731,3 +2731,52 @@ mappings:
         coverage: partial
     annotations: ''
     notes: 'Corroborates supplied provisioning ranges and fresh allocations; does not prove cluster reconfiguration or provider network range APIs.'
+  - test_id: SPERF01-01
+    requirements:
+      - req_id: SPERF01
+        source: storage-perf-prd
+        coverage: full
+    annotations: 'Placeholder mapping until the official storage performance requirements land.'
+    notes: ''
+  - test_id: SPERF02-01
+    requirements:
+      - req_id: SPERF02
+        source: storage-perf-prd
+        coverage: full
+    annotations: 'Placeholder mapping until the official storage performance requirements land.'
+    notes: ''
+  - test_id: SPERF03-01
+    requirements:
+      - req_id: SPERF03
+        source: storage-perf-prd
+        coverage: full
+    annotations: 'Placeholder mapping until the official storage performance requirements land.'
+    notes: ''
+  - test_id: SPERF05-01
+    requirements:
+      - req_id: SPERF05
+        source: storage-perf-prd
+        coverage: partial
+    annotations: 'Placeholder mapping. Partial: the run step and teardown release the sweep on every exit isvctl survives (failure, wait deadline, step timeout); after an interrupted run (Ctrl-C) or a lost client, release needs a later --phase teardown or --collect from the results directory.'
+    notes: ''
+  - test_id: SPERF07-01
+    requirements:
+      - req_id: SPERF07
+        source: storage-perf-prd
+        coverage: full
+    annotations: 'Placeholder mapping until the official storage performance requirements land.'
+    notes: ''
+  - test_id: SPERF08-01
+    requirements:
+      - req_id: SPERF08
+        source: storage-perf-prd
+        coverage: full
+    annotations: 'Placeholder mapping. Floors default to 0 (report only); this does not replace HSS02-01 (HssQosThroughputCheck), which asserts provider QoS limits on the same tests.* fields.'
+    notes: ''
+  - test_id: SPERF08-02
+    requirements:
+      - req_id: SPERF08
+        source: storage-perf-prd
+        coverage: full
+    annotations: 'Placeholder mapping. Floors default to 0 (report only); this does not replace HSS02-01 (HssQosThroughputCheck), which asserts provider QoS limits on the same tests.* fields.'
+    notes: ''

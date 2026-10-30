@@ -154,6 +154,21 @@ def _built_in_reference(path: Path, start: Path, target_dir: Path, template_dir:
     return _relative_posix_path(path, start=repo_root)
 
 
+def _rewrite_shared_paths(content: str, start: Path, target_dir: Path, template_dir: Path) -> str:
+    """Point `../../../shared/` script references at the built-in shared scripts, from ``start``."""
+    shared_dir = template_dir.parents[1] / "shared"
+    return re.sub(
+        r"\.\./\.\./\.\./shared/([A-Za-z0-9_./-]+\.py)",
+        lambda match: _built_in_reference(
+            shared_dir / match.group(1),
+            start=start,
+            target_dir=target_dir,
+            template_dir=template_dir,
+        ),
+        content,
+    )
+
+
 def _rewrite_config_paths(target_dir: Path, template_dir: Path) -> None:
     """Rewrite generated YAML references that depend on provider-tree placement."""
     config_dir = target_dir / "config"
@@ -161,7 +176,6 @@ def _rewrite_config_paths(target_dir: Path, template_dir: Path) -> None:
         return
 
     suites_dir = template_dir.parents[1] / "suites"
-    shared_dir = template_dir.parents[1] / "shared"
 
     for path in config_dir.glob("*.yaml"):
         content = path.read_text(encoding="utf-8")
@@ -175,31 +189,36 @@ def _rewrite_config_paths(target_dir: Path, template_dir: Path) -> None:
             ),
             content,
         )
-        updated = re.sub(
-            r"\.\./\.\./\.\./shared/([A-Za-z0-9_./-]+\.py)",
-            lambda match: _built_in_reference(
-                shared_dir / match.group(1),
-                start=path.parent,
-                target_dir=target_dir,
-                template_dir=template_dir,
-            ),
-            updated,
-        )
+        updated = _rewrite_shared_paths(updated, path.parent, target_dir, template_dir)
         if updated != content:
             path.write_text(updated, encoding="utf-8")
         _assert_relative_paths_resolve(path, updated)
 
+    # Command overlays are loaded after a config with a second -f, and their commands resolve
+    # from that config's directory, not the overlay's, so rewrite and check them from there.
+    # Other overlays (storage provider manifests) resolve from their own directory and are
+    # left alone.
+    for path in (config_dir / "overlays").glob("*.yaml"):
+        content = path.read_text(encoding="utf-8")
+        if not re.search(r"^commands:", content, flags=re.MULTILINE):
+            continue
+        updated = _rewrite_shared_paths(content, config_dir, target_dir, template_dir)
+        if updated != content:
+            path.write_text(updated, encoding="utf-8")
+        _assert_relative_paths_resolve(path, updated, base_dir=config_dir)
 
-def _assert_relative_paths_resolve(yaml_path: Path, content: str) -> None:
+
+def _assert_relative_paths_resolve(yaml_path: Path, content: str, base_dir: Path | None = None) -> None:
     """Fail loudly if any `../`-rooted reference in the rewritten YAML doesn't exist.
 
     Catches silent breakage when a future template introduces a relative-path
     pattern the rewriter doesn't know about, leaving a dangling reference in
-    the generated scaffold.
+    the generated scaffold. References resolve from ``base_dir`` (default: the YAML's own
+    directory).
     """
     for match in RELATIVE_PATH_RE.finditer(content):
         reference = match.group(0)
-        candidate = (yaml_path.parent / reference).resolve()
+        candidate = ((base_dir or yaml_path.parent) / reference).resolve()
         if not candidate.exists():
             raise ValueError(
                 f"Generated scaffold {_display_path(yaml_path)} references {reference} "

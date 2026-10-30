@@ -22,6 +22,7 @@ Welcome to the documentation for NVIDIA AI Cloud Validation suite - a collection
 - [Provider Registry](guides/provider-registry.md) - List, fetch and register providers maintained in partner repositories
 - [Remote Deployment](guides/remote-deployment.md) - Deploy and run tests on remote machines
 - [Local Development](guides/local-development.md) - MicroK8s setup for local testing
+- [Storage Performance](guides/storage-performance.md) - Run the storage-scale-test sweep, implement its fixtures, and debug or release a sweep
 - [Troubleshooting: Test runs stuck in STARTED](guides/troubleshooting-started-tests.md) - Why runs stay STARTED in the portal and how to fix it
 
 ### Contributing
