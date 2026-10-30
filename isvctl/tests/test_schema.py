@@ -379,6 +379,7 @@ class TestOutputSchemaValidation:
             "runtime_class": "nvidia",
             "gpu_resource_name": "nvidia.com/gpu",
         },
+        "kubeconfig_path": "",
     }
 
     EKS_SETUP_OUTPUT: ClassVar[dict] = {

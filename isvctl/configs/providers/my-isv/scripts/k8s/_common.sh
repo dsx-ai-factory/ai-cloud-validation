@@ -22,6 +22,7 @@
 #   DEFAULT_GPU_NS    - fallback GPU operator namespace (default: nvidia-gpu-operator)
 #   USE_NVIDIA_SMI_FALLBACK - "true" to fall back to nvidia-smi for GPU/driver info (default: false)
 #   REQUIRE_JQ        - "true" to require jq and populate nodes array (default: false)
+#   KUBECONFIG_PATH   - kubeconfig later steps should use; empty means kubectl's own
 #   OFFERED_VERSIONS  - newline-separated Kubernetes versions this distribution can
 #                       install (K8S02-01). Reported as an empty array when unset.
 #
@@ -181,6 +182,7 @@ cat << EOF
     "static_volume_handle": "",
     "static_driver_name": "",
     "static_volume_az": ""
-  }
+  },
+  "kubeconfig_path": "${KUBECONFIG_PATH:-}"
 }
 EOF

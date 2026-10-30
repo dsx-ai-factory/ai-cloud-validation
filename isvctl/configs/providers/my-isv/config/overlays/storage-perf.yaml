@@ -34,13 +34,24 @@
 # provision_perf_storage / deprovision_perf_storage (a Bound ReadWriteMany PVC for it that the
 # selected nodes can mount). The stubs return dummy success under ISVCTL_DEMO_MODE=1.
 #
+# As shipped, setup_cluster is scripts/k8s/setup.sh: it inventories the cluster kubectl points
+# at, creates nothing, and pins it (a copy of the current context under _output/) for the rest
+# of the run. The perf_* settings name what the sweep uses there, from the environment by
+# default, so a cluster that already mounts the filesystem as a claim runs with no code:
+#
+#   STORAGE_PERF_NAMESPACE=storage-perf STORAGE_PERF_CLAIM=perf-claim \
+#   STORAGE_PERF_NODE_SELECTOR=storage-test=true uv run isvctl test run ...   (as above)
+#
+# The fixtures then adopt that claim and report "created": false, so teardown leaves it alone.
+# K8S_EXPECTED_CONTEXT=<context> makes setup stop unless kubectl points at that context.
+#
 # storage-scale-test is the pinned source release `make vendor-storage-scale-test` (or `make
 # vendor`) extracts into isvtest/vendor/storage-scale-test; elbencho runs in the benchmark Pods
 # from the image that release pins, so nothing else is installed locally.
 # STORAGE_SCALE_TEST_BASE=/path/to/checkout uses another tree instead; isvctl writes that
 # tree's env.sh, so dedicate it to isvctl. Also needed on PATH: bash 4.4+, kubectl, flock,
 # GNU tar and timeout (on macOS: brew install bash coreutils gnu-tar flock; Python comes from uv),
-# and labels on the worker nodes: STORAGE_PERF_NODE_SELECTOR=storage-test=true
+# and labels on the worker nodes the sweep runs from (STORAGE_PERF_NODE_SELECTOR).
 #
 # The default sweep is a short smoke run (one node, IO sizes r4K and 1M, one thread, IO
 # depth 1, 10 s per phase): it proves the sweep runs and reports real numbers, not
@@ -72,13 +83,20 @@ commands:
         output_schema: storage_perf_tool
         timeout: 30
 
-      # Same contract as storage.yaml's fixture: kubeconfig + StorageClass names.
+      # The current cluster's inventory; it creates nothing. A provider that creates its
+      # cluster replaces this with its own, reporting kubeconfig_path, and may also report
+      # a storage_perf block (namespace, claim, node_selector) from its own APIs. Each
+      # value it leaves out falls back to the matching perf_* setting.
       - name: setup_cluster
         phase: setup
-        command: "python ../scripts/storage/setup_cluster.py"
+        command: "../scripts/k8s/setup.sh"
         requires: [kubernetes]
+        # Pin the cluster: every later step, and storage-scale-test's own kubectl calls,
+        # use this copy of the current context, so they cannot follow a context switch.
+        env:
+          K8S_KUBECONFIG_OUT: "{{perf_kubeconfig}}"
         output_schema: generic
-        timeout: 60
+        timeout: 120
 
       # Fixtures, not self-contained tests: the filesystem and its claim stay up for the
       # sweep and are removed in teardown.
@@ -93,6 +111,9 @@ commands:
           - "{{perf_capacity_gib}}"
           - "--record"
           - "{{perf_filesystem_record}}"
+          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default('', true)}}"
+          - "--namespace={{steps.setup_cluster.storage_perf.namespace | default(perf_namespace, true)}}"
+          - "--existing-claim={{steps.setup_cluster.storage_perf.claim | default(perf_claim, true)}}"
         output_schema: storage_perf_filesystem
         timeout: 3600
 
@@ -101,14 +122,13 @@ commands:
         command: "python ../scripts/storage/provision_perf_storage.py"
         requires: [kubernetes]
         args:
-          - "--kubeconfig"
-          - "{{steps.setup_cluster.kubeconfig_path}}"
+          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default('', true)}}"
           - "--filesystem-id"
           - "{{steps.create_perf_filesystem.filesystem_id}}"
-          - "--namespace"
-          - "{{perf_namespace}}"
+          - "--namespace={{steps.setup_cluster.storage_perf.namespace | default(perf_namespace, true)}}"
           - "--record"
           - "{{perf_claim_record}}"
+          - "--existing-claim={{steps.setup_cluster.storage_perf.claim | default(perf_claim, true)}}"
         output_schema: storage_perf_claim
         timeout: 900
 
@@ -121,11 +141,10 @@ commands:
         args:
           - "--scale-test-base"
           - "{{steps.find_storage_scale_test.scale_test_base}}"
-          - "--kubeconfig"
-          - "{{steps.setup_cluster.kubeconfig_path}}"
+          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default('', true)}}"
           - "--claim"
           - "{{steps.provision_perf_storage.namespace}}/{{steps.provision_perf_storage.claim_name}}"
-          - "--node-selector={{perf_node_selector}}"
+          - "--node-selector={{steps.setup_cluster.storage_perf.node_selector | default(perf_node_selector, true)}}"
           - "--nodes"
           - "{{perf_nodes}}"
           - "--io-sizes"
@@ -207,21 +226,23 @@ commands:
         output_schema: storage_perf_fixture_teardown
         timeout: 3600
 
+      # setup_cluster created nothing, so there is nothing to release.
       - name: teardown_cluster
         phase: teardown
-        command: "python ../scripts/storage/teardown_cluster.py"
+        command: "../scripts/k8s/teardown.sh"
         requires: [kubernetes]
-        args:
-          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default('', true)}}"
-          - "{{cluster_teardown_flag}}"
         timeout: 60
 
 tests:
   settings:
     # Empty = the vendored release in isvtest/vendor/storage-scale-test.
     scale_test_base: "{{env.STORAGE_SCALE_TEST_BASE | default('', true)}}"
+    # What the sweep uses on the cluster, from whoever knows it: the environment, --set,
+    # or an -f override file. A storage_perf value setup_cluster reports wins over these.
     perf_node_selector: "{{env.STORAGE_PERF_NODE_SELECTOR | default('', true)}}"
-    perf_namespace: "storage-perf"
+    perf_namespace: "{{env.STORAGE_PERF_NAMESPACE | default('storage-perf', true)}}"
+    # Empty = the fixtures create their own filesystem and claim.
+    perf_claim: "{{env.STORAGE_PERF_CLAIM | default('', true)}}"
     perf_filesystem_name: "isv-storage-perf"
     perf_capacity_gib: "1200"
     # Everything a run generates - its inputs (target and workload files, the sweep handle
@@ -231,6 +252,8 @@ tests:
     perf_state_file: "{{env.PWD | default('.', true)}}/_output/storage-perf/inputs/state.json"
     perf_filesystem_record: "{{env.PWD | default('.', true)}}/_output/storage-perf/inputs/filesystem.json"
     perf_claim_record: "{{env.PWD | default('.', true)}}/_output/storage-perf/inputs/claim.json"
+    # The pinned copy of the current context (credentials included, mode 600).
+    perf_kubeconfig: "{{env.PWD | default('.', true)}}/_output/storage-perf/inputs/kubeconfig"
     # Smoke sweep: 2 cells, 10 s per phase.
     perf_nodes: "1"
     perf_io_sizes: "r4K,1M"
@@ -241,7 +264,6 @@ tests:
     # Report only. Set to your own expectations to enforce a floor.
     perf_min_mbps: "0"
     perf_min_iops: "0"
-    # STORAGE_SKIP_TEARDOWN=true keeps the cluster, and the filesystem and claim this run
-    # created (their records stay under _output/, so a later teardown can still remove them).
-    cluster_teardown_flag: "{{(env.STORAGE_SKIP_TEARDOWN == 'true') | ternary('--skip-destroy', '')}}"
+    # STORAGE_SKIP_TEARDOWN=true keeps the filesystem and claim this run created (their
+    # records stay under _output/, so a later teardown can still remove them).
     perf_teardown_flag: "{{(env.STORAGE_SKIP_TEARDOWN == 'true') | ternary('--skip-destroy', '')}}"

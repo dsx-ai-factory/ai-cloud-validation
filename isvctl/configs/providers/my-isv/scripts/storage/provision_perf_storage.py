@@ -25,7 +25,8 @@ Expose the filesystem create_perf_filesystem reported as a PVC that is Bound, Re
 and Filesystem-mode, and that every node matching the sweep's node selector can mount - for
 example a static PersistentVolume for your CSI driver whose volume handle is the filesystem
 ID, plus a claim bound to it. Reusing an existing claim is fine: report "created": false and
-deprovision_perf_storage leaves it alone. The sweep writes only under its test path (default
+deprovision_perf_storage leaves it alone; --existing-claim (the perf_claim setting) does
+this here, after checking the claim is usable. The sweep writes only under its test path (default
 "scale-test") inside the claim, which must be writable by the benchmark Pods' UID/GID
 (default 2000). With --record the result is also written to that file, so a teardown run on
 its own (`--phase teardown`, which has no setup outputs) still knows what to delete.
@@ -41,6 +42,7 @@ Required JSON output fields:
 Usage:
     python provision_perf_storage.py --kubeconfig <path> --filesystem-id fs-0123456789 \\
         --namespace storage-perf [--record <path>]
+    python provision_perf_storage.py --namespace storage-perf --existing-claim perf-claim
 """
 
 import argparse
@@ -49,6 +51,10 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+
+# Allow importing provider-local helpers from scripts/common/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.k8s_claim import claim_problem, get_claim, recorded_creation
 
 # ISVCTL_DEMO_MODE=1 enables demo-success output (used by `make demo-test`).
 DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
@@ -61,6 +67,7 @@ def main() -> int:
     parser.add_argument("--filesystem-id", default="", help="Filesystem create_perf_filesystem reported")
     parser.add_argument("--namespace", default="storage-perf", help="Namespace for the claim")
     parser.add_argument("--record", default="", help="File to record the result in for teardown")
+    parser.add_argument("--existing-claim", default="", help="Reuse this claim instead of creating one")
     args = parser.parse_args()
 
     result: dict[str, Any] = {
@@ -83,8 +90,21 @@ def main() -> int:
     # ║  5. result["success"] = True                                      ║
     # ╚══════════════════════════════════════════════════════════════════╝
 
-    if DEMO_MODE:
+    previous = recorded_creation(args.record)
+    if previous:
+        result["error"] = previous
+    elif DEMO_MODE and args.existing_claim:
+        result.update({"success": True, "claim_name": args.existing_claim})
+    elif DEMO_MODE:
         result.update({"success": True, "claim_name": "demo-perf-claim", "created": True})
+    elif args.existing_claim:
+        pvc, error = get_claim(args.kubeconfig, args.namespace, args.existing_claim)
+        if pvc is not None:
+            error = claim_problem(pvc)
+        if error:
+            result["error"] = error
+        else:
+            result.update({"success": True, "claim_name": args.existing_claim})
     else:
         result["error"] = "Not implemented - expose the filesystem as a Bound ReadWriteMany PVC"
 

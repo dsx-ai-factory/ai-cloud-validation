@@ -333,12 +333,17 @@ volume. The three test-phase steps all reuse that fixture.
 **Performance (opt-in).** The Performance group's checks bind to steps that only the
 command overlay `providers/my-isv/config/overlays/storage-perf.yaml` supplies (load it after
 `storage.yaml`, with `--capability kubernetes --label performance`). The benchmark steps are
-shared; a provider writes only the four fixture scripts. Every step's output has a
-`storage_perf_*` schema. See [Storage Performance](../../../docs/guides/storage-performance.md).
+shared. A provider supplies `setup_cluster` (as shipped, the generic `scripts/k8s/setup.sh`,
+which inventories and pins the current cluster) and the four fixture scripts; with
+`STORAGE_PERF_CLAIM` naming an existing claim the fixture stubs adopt it, so an existing
+cluster needs no scripts.
+`setup_cluster` uses the `generic` schema; every other step's output has a `storage_perf_*`
+schema. See [Storage Performance](../../../docs/guides/storage-performance.md).
 
 | Step | Phase | Script | Key JSON Fields |
 |------|-------|--------|-----------------|
 | `find_storage_scale_test` | setup | `shared/storage/perf/find_storage_scale_test.py` | `scale_test_base`, `version` |
+| `setup_cluster` | setup | `providers/my-isv/scripts/k8s/setup.sh` | `kubeconfig_path` (pinned copy of the current context); optional `storage_perf.{namespace,claim,node_selector}` |
 | `create_perf_filesystem` | setup | `providers/my-isv/scripts/storage/create_perf_filesystem.py` | `filesystem_id`, `created` |
 | `provision_perf_storage` | setup | `providers/my-isv/scripts/storage/provision_perf_storage.py` | `namespace`, `claim_name`, `created` |
 | `run_storage_test` | test | `shared/storage/perf/run_storage_test.py` | `state`, `results_dir`, `executions`, `resources_released` |

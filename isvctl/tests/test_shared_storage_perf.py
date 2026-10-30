@@ -25,6 +25,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -758,11 +759,13 @@ def test_describe_failure_says_what_to_do_next() -> None:
 MY_ISV_STORAGE = Path(__file__).resolve().parents[1] / "configs" / "providers" / "my-isv" / "scripts" / "storage"
 
 
-def _run_stub(name: str, *args: str, demo: bool) -> dict[str, Any]:
+def _run_stub(name: str, *args: str, demo: bool, path: Path | None = None) -> dict[str, Any]:
     """Run a my-isv perf fixture stub, in or out of demo mode, and return its JSON."""
     env = {k: v for k, v in os.environ.items() if k != "ISVCTL_DEMO_MODE"}
     if demo:
         env["ISVCTL_DEMO_MODE"] = "1"
+    if path is not None:
+        env["PATH"] = f"{path}{os.pathsep}{env['PATH']}"
     proc = subprocess.run(
         [sys.executable, str(MY_ISV_STORAGE / f"{name}.py"), *args],
         capture_output=True,
@@ -810,12 +813,89 @@ def test_a_standalone_teardown_leaves_a_reused_fixture_alone(delete: str, id_fla
     assert not record.exists()
 
 
+def _fake_kubectl(tmp_path: Path, pvc: dict[str, Any]) -> Path:
+    """A kubectl on PATH whose `get pvc` prints ``pvc`` and records its arguments."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (tmp_path / "pvc.json").write_text(json.dumps(pvc))
+    kubectl = bin_dir / "kubectl"
+    kubectl.write_text(f'#!/bin/sh\necho "$@" >> {tmp_path / "calls"}\ncat {tmp_path / "pvc.json"}\n')
+    kubectl.chmod(0o755)
+    return bin_dir
+
+
+USABLE_CLAIM = {
+    "spec": {"accessModes": ["ReadWriteMany"], "volumeMode": "Filesystem", "volumeName": "pv-perf"},
+    "status": {"phase": "Bound"},
+}
+
+
+@pytest.mark.parametrize(("stub", "field", "value"), [
+    ("create_perf_filesystem", "filesystem_id", "pv-perf"),
+    ("provision_perf_storage", "claim_name", "perf-claim"),
+])
+def test_an_existing_claim_is_adopted_not_created(stub: str, field: str, value: str, tmp_path: Path) -> None:
+    """--existing-claim reads the claim (read-only) and reports it as not created."""
+    bin_dir = _fake_kubectl(tmp_path, USABLE_CLAIM)
+
+    out = _run_stub(stub, "--namespace=perf-ns", "--existing-claim=perf-claim", demo=False, path=bin_dir)
+
+    assert out["success"] is True, out
+    assert out[field] == value and out["created"] is False
+    assert (tmp_path / "calls").read_text().split()[:5] == ["-n", "perf-ns", "get", "pvc", "perf-claim"]
+    _assert_schema(stub, out)
+
+
+@pytest.mark.parametrize("stub", ["create_perf_filesystem", "provision_perf_storage"])
+def test_demo_mode_never_contacts_a_cluster(stub: str, tmp_path: Path) -> None:
+    """Under ISVCTL_DEMO_MODE=1 an exported STORAGE_PERF_CLAIM is adopted on paper, with no kubectl call."""
+    bin_dir = _fake_kubectl(tmp_path, USABLE_CLAIM)
+
+    out = _run_stub(stub, "--existing-claim=perf-claim", demo=True, path=bin_dir)
+
+    assert out["success"] is True and out["created"] is False
+    assert not (tmp_path / "calls").exists()
+    _assert_schema(stub, out)
+
+
+@pytest.mark.parametrize("stub", ["create_perf_filesystem", "provision_perf_storage"])
+def test_setup_keeps_the_record_of_a_fixture_an_earlier_run_kept(stub: str, tmp_path: Path) -> None:
+    """A record saying an earlier run created a fixture is not overwritten: teardown needs it to remove that fixture."""
+    record = tmp_path / "record.json"
+    record.write_text(json.dumps({"success": True, "created": True, "claim_name": "kept", "filesystem_id": "kept"}))
+    bin_dir = _fake_kubectl(tmp_path, USABLE_CLAIM)
+
+    out = _run_stub(stub, "--existing-claim=perf-claim", f"--record={record}", demo=False, path=bin_dir)
+
+    assert out["success"] is False
+    assert "--phase teardown" in out["error"]
+    assert json.loads(record.read_text())["created"] is True
+    assert not (tmp_path / "calls").exists()
+    _assert_schema(stub, out)
+
+
+@pytest.mark.parametrize("stub", ["create_perf_filesystem", "provision_perf_storage"])
+def test_an_unusable_existing_claim_fails_setup(stub: str, tmp_path: Path) -> None:
+    """A claim the sweep cannot share across nodes stops setup with the reason."""
+    claim = {**USABLE_CLAIM, "spec": {**USABLE_CLAIM["spec"], "accessModes": ["ReadWriteOnce"]}}
+    bin_dir = _fake_kubectl(tmp_path, claim)
+
+    out = _run_stub(stub, "--existing-claim=perf-claim", demo=False, path=bin_dir)
+
+    assert out["success"] is False
+    assert "accessModes=['ReadWriteOnce']" in out["error"]
+    _assert_schema(stub, out)
+
+
 # ─── Plumbing: ACV config -> step arguments -> storage-scale-test inputs ─────
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs" / "providers" / "my-isv" / "config"
 SETUP_OUTPUTS = {
     "find_storage_scale_test": {"scale_test_base": "/opt/storage-scale-test"},
-    "setup_cluster": {"kubeconfig_path": "/tmp/kubeconfig"},
+    "setup_cluster": {
+        "kubeconfig_path": "/tmp/kubeconfig",
+        "storage_perf": {"namespace": "", "claim": "", "node_selector": "storage-test=true", "node_count": 2},
+    },
     "create_perf_filesystem": {"filesystem_id": "fs-1", "created": True},
     "provision_perf_storage": {"namespace": "perf-ns", "claim_name": "perf-claim", "created": True},
 }
@@ -847,9 +927,8 @@ def _flag(args: list[str], name: str) -> str:
     raise AssertionError(f"{name} not in {args}")
 
 
-def test_run_step_receives_the_default_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_step_receives_the_default_settings() -> None:
     """Setup outputs and the overlay's default settings reach run_storage_test."""
-    monkeypatch.setenv("STORAGE_PERF_NODE_SELECTOR", "storage-test=true")
     args = _render("run_storage_test")
 
     assert _flag(args, "--scale-test-base") == "/opt/storage-scale-test"
@@ -867,10 +946,10 @@ def test_run_step_receives_the_default_settings(monkeypatch: pytest.MonkeyPatch)
     assert _flag(args, "--time-budget") == "2280"
 
 
-def test_set_values_reach_the_run_and_evaluate_steps(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_set_values_reach_the_run_and_evaluate_steps() -> None:
     """`--set tests.settings.<name>=...` overrides flow into the step command lines."""
-    monkeypatch.setenv("STORAGE_PERF_NODE_SELECTOR", "pool=perf")
     sets = [
+        "tests.settings.perf_node_selector=pool=perf",
         "tests.settings.perf_nodes=1,2",
         "tests.settings.perf_io_sizes=r64K,4M",
         "tests.settings.perf_threads=2,8",
@@ -880,7 +959,7 @@ def test_set_values_reach_the_run_and_evaluate_steps(monkeypatch: pytest.MonkeyP
         "tests.settings.perf_min_mbps=500",
         "tests.settings.perf_min_iops=2000",
     ]
-    run = _render("run_storage_test", sets)
+    run = _render("run_storage_test", sets, {**SETUP_OUTPUTS, "setup_cluster": {}})
     evaluate = _render("evaluate_storage_test", sets, {**SETUP_OUTPUTS, "run_storage_test": {"state": "SUCCESS"}})
 
     assert [_flag(run, f) for f in ("--nodes", "--io-sizes", "--threads", "--iodepth", "--duration")] == [
@@ -909,12 +988,52 @@ def test_a_standalone_teardown_renders_without_setup_outputs() -> None:
     assert _flag(release, "--state-file").endswith("_output/storage-perf/inputs/state.json")
 
 
-def test_rendered_settings_reach_storage_scale_test_inputs(
-    checkout: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_fixtures_adopt_the_claim_setup_cluster_reports() -> None:
+    """setup_cluster's storage_perf claim and namespace reach both fixtures as --existing-claim."""
+    outputs = {
+        **SETUP_OUTPUTS,
+        "setup_cluster": {"storage_perf": {"namespace": "perf-ns", "claim": "perf-claim", "node_selector": ""}},
+    }
+    for step in ("create_perf_filesystem", "provision_perf_storage"):
+        args = _render(step, outputs=outputs)
+        assert _flag(args, "--existing-claim") == "perf-claim"
+        assert _flag(args, "--namespace") == "perf-ns"
+        assert _flag(args, "--kubeconfig") == ""
+
+
+def test_without_a_reported_claim_the_fixtures_create_their_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No storage_perf claim and no STORAGE_PERF_*: --existing-claim renders empty, the namespace defaults."""
+    for name in ("STORAGE_PERF_CLAIM", "STORAGE_PERF_NAMESPACE"):
+        monkeypatch.delenv(name, raising=False)
+    for step in ("create_perf_filesystem", "provision_perf_storage"):
+        args = _render(step, outputs={**SETUP_OUTPUTS, "setup_cluster": {}})
+        assert _flag(args, "--existing-claim") == ""
+        assert _flag(args, "--namespace") == "storage-perf"
+
+
+def test_storage_perf_variables_apply_when_setup_cluster_reports_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A provider's own setup_cluster may omit storage_perf; the STORAGE_PERF_* settings fill it in."""
+    monkeypatch.setenv("STORAGE_PERF_CLAIM", "env-claim")
+    monkeypatch.setenv("STORAGE_PERF_NAMESPACE", "env-ns")
+    monkeypatch.setenv("STORAGE_PERF_NODE_SELECTOR", "pool=env")
+    outputs = {**SETUP_OUTPUTS, "setup_cluster": {}}
+
+    for step in ("create_perf_filesystem", "provision_perf_storage"):
+        args = _render(step, outputs=outputs)
+        assert [_flag(args, "--existing-claim"), _flag(args, "--namespace")] == ["env-claim", "env-ns"]
+    assert _flag(_render("run_storage_test", outputs=outputs), "--node-selector") == "pool=env"
+
+
+def test_setup_cluster_values_win_over_the_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One precedence rule for every storage_perf value: what setup_cluster reports, then the setting."""
+    monkeypatch.setenv("STORAGE_PERF_NODE_SELECTOR", "pool=env")
+    assert _flag(_render("run_storage_test"), "--node-selector") == "storage-test=true"
+
+
+def test_rendered_settings_reach_storage_scale_test_inputs(checkout: Path, tmp_path: Path) -> None:
     """End to end: --set values -> rendered args -> the files storage-scale-test reads."""
-    monkeypatch.setenv("STORAGE_PERF_NODE_SELECTOR", "pool=perf")
     sets = [
+        "tests.settings.perf_node_selector=pool=perf",
         "tests.settings.perf_nodes=2",
         "tests.settings.perf_io_sizes=r64K,4M",
         "tests.settings.perf_threads=4",
@@ -924,7 +1043,9 @@ def test_rendered_settings_reach_storage_scale_test_inputs(
         f"tests.settings.perf_state_file={tmp_path / 'inputs' / 'state.json'}",
     ]
     args = _render(
-        "run_storage_test", sets, {**SETUP_OUTPUTS, "find_storage_scale_test": {"scale_test_base": str(checkout)}}
+        "run_storage_test",
+        sets,
+        {**SETUP_OUTPUTS, "setup_cluster": {}, "find_storage_scale_test": {"scale_test_base": str(checkout)}},
     )
 
     rc, out = _run_script("run_storage_test", *args, "--interval", "0")
@@ -1092,3 +1213,79 @@ def test_storage_skip_teardown_reaches_the_fixture_teardown_steps(skip: bool, mo
         monkeypatch.delenv("STORAGE_SKIP_TEARDOWN", raising=False)
     for step in ("deprovision_perf_storage", "delete_perf_filesystem"):
         assert ("--skip-destroy" in _render(step)) is skip
+
+
+# ─── my-isv scripts/k8s/setup.sh: cluster guard, pinned kubeconfig, demo mode ─────
+
+K8S_SETUP = Path(__file__).resolve().parents[1] / "configs" / "providers" / "my-isv" / "scripts" / "k8s" / "setup.sh"
+FAKE_KUBECONFIG = "apiVersion: v1\nkind: Config\ncurrent-context: ctx-a\n"
+
+
+def _run_setup(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
+    """Run setup.sh against a fake kubectl (via KUBECTL) whose current context is ctx-a."""
+    kubectl = tmp_path / "fake-kubectl"
+    kubectl.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> {tmp_path / "calls"}\n'
+        'case "$*" in\n'
+        '  "config current-context") echo ctx-a ;;\n'
+        f'  "config view --minify --flatten") printf \'{FAKE_KUBECONFIG}\' ;;\n'
+        "esac\n"
+    )
+    kubectl.chmod(0o755)
+    base = {k: v for k, v in os.environ.items() if k not in ("ISVCTL_DEMO_MODE", "K8S_EXPECTED_CONTEXT", "K8S_KUBECONFIG_OUT")}
+    return subprocess.run(
+        ["bash", str(K8S_SETUP)],
+        capture_output=True,
+        text=True,
+        env={**base, "KUBECTL": str(kubectl), **env},
+        check=False,
+        timeout=60,
+    )
+
+
+needs_jq = pytest.mark.skipif(shutil.which("jq") is None, reason="setup.sh requires jq")
+
+
+@needs_jq
+def test_setup_pins_the_current_context_for_the_rest_of_the_run(tmp_path: Path) -> None:
+    """K8S_KUBECONFIG_OUT gets a private copy of the current context, reported as kubeconfig_path."""
+    pinned = tmp_path / "inputs" / "kubeconfig"
+
+    proc = _run_setup(tmp_path, K8S_EXPECTED_CONTEXT="ctx-a", K8S_KUBECONFIG_OUT=str(pinned))
+
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["cluster_name"] == "ctx-a" and out["kubeconfig_path"] == str(pinned)
+    assert pinned.read_text() == FAKE_KUBECONFIG.replace("\\n", "\n")
+    assert pinned.stat().st_mode & 0o077 == 0
+
+
+@needs_jq
+def test_setup_without_a_pin_reports_kubectls_own_kubeconfig(tmp_path: Path) -> None:
+    """No K8S_KUBECONFIG_OUT: kubeconfig_path is empty, meaning kubectl's own."""
+    proc = _run_setup(tmp_path)
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["kubeconfig_path"] == ""
+
+
+def test_setup_stops_on_an_unexpected_context(tmp_path: Path) -> None:
+    """K8S_EXPECTED_CONTEXT naming another context stops setup before it inventories or pins anything."""
+    pinned = tmp_path / "kubeconfig"
+
+    proc = _run_setup(tmp_path, K8S_EXPECTED_CONTEXT="ctx-b", K8S_KUBECONFIG_OUT=str(pinned))
+
+    assert proc.returncode == 1
+    assert "current context is 'ctx-a', expected K8S_EXPECTED_CONTEXT='ctx-b'" in proc.stderr
+    assert not pinned.exists()
+    assert (tmp_path / "calls").read_text().splitlines() == ["config current-context"]
+
+
+def test_setup_demo_mode_never_contacts_a_cluster(tmp_path: Path) -> None:
+    """ISVCTL_DEMO_MODE=1 prints a sample inventory without running kubectl."""
+    proc = _run_setup(tmp_path, ISVCTL_DEMO_MODE="1", K8S_KUBECONFIG_OUT=str(tmp_path / "kubeconfig"))
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["success"] is True
+    assert not (tmp_path / "calls").exists()

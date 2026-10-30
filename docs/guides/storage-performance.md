@@ -16,6 +16,8 @@ numbers; a provider can set its own floors (see [Floors](#floors)).
 ```bash
 make vendor                           # once: pinned test tools, incl. storage-scale-test, into isvtest/vendor/
 export STORAGE_PERF_NODE_SELECTOR=storage-test=true
+# On a cluster that already mounts the filesystem as a claim, also name it:
+export STORAGE_PERF_NAMESPACE=storage-perf STORAGE_PERF_CLAIM=perf-claim
 uv run isvctl test run \
     -f isvctl/configs/providers/my-isv/config/storage.yaml \
     -f isvctl/configs/providers/my-isv/config/overlays/storage-perf.yaml \
@@ -25,6 +27,11 @@ uv run isvctl test run \
 - The overlay replaces the storage config's step list, so this run does only the
   performance sweep. Run the plain storage config separately for the functional
   checks.
+- `setup_cluster` is `scripts/k8s/setup.sh`: it inventories the cluster kubectl
+  points at and creates nothing, and pins it for the rest of the run (see
+  [The cluster and its claim](#the-cluster-and-its-claim)). Set
+  `K8S_EXPECTED_CONTEXT=<context>` to stop the run unless kubectl points at that
+  context.
 - Always select `--label performance`. Labels choose checks, not steps, but
   without the label the suite's live Kubernetes checks would also run, and some of
   them create claims.
@@ -34,8 +41,6 @@ uv run isvctl test run \
   put Homebrew's bash first on `PATH`. Its reports need Python 3.12+, which `uv`
   already provides: `make vendor` and `isvctl` both run under the project's Python.
   Elbencho itself runs in the benchmark Pods from the image the release pins.
-  `make vendor-storage-scale-test-elbencho` also fetches the release's pinned
-  elbencho binaries; only non-Kubernetes sweeps need them.
 - `STORAGE_SCALE_TEST_BASE=/path/to/checkout` uses another storage-scale-test tree
   (v2.1.0 or later). isvctl writes that tree's `env.sh`, so dedicate the tree to
   isvctl.
@@ -53,7 +58,7 @@ uv run isvctl test run \
 | Phase | Step | Does |
 |---|---|---|
 | setup | `find_storage_scale_test` | Finds the vendored release (or `STORAGE_SCALE_TEST_BASE`) |
-| setup | `setup_cluster` | Provider: the cluster and its kubeconfig |
+| setup | `setup_cluster` | Provider: the cluster, and the claim and nodes to use (`storage_perf`) |
 | setup | `create_perf_filesystem` | Provider: the filesystem under test |
 | setup | `provision_perf_storage` | Provider: a claim for it |
 | test | `run_storage_test` | Submits the sweep, waits for it, collects it |
@@ -93,6 +98,37 @@ its progress, and `--collect` copies the results back and releases what it holds
 policies). `run_storage_test` does all three synchronously, so one step covers the
 sweep from submit to release.
 
+## The cluster and its claim
+
+**The cluster.** `setup_cluster` writes the current context, credentials
+included, to `_output/storage-perf/inputs/kubeconfig` (mode 600; `_output/` is
+git-ignored) and reports it as `kubeconfig_path`. Every later step, and
+storage-scale-test's own `kubectl` calls, use that file, so the run stays on the
+cluster setup checked even if the shell's context changes, and a later
+`--phase teardown` releases the sweep there too. A provider that creates its
+cluster replaces `setup_cluster` and reports its own `kubeconfig_path`.
+
+**What the sweep uses on it** comes from whoever knows the cluster, through three
+settings:
+
+| Setting | As shipped, from | Read by |
+|---|---|---|
+| `perf_namespace` | `STORAGE_PERF_NAMESPACE`, else `storage-perf` | Both fixtures |
+| `perf_claim` | `STORAGE_PERF_CLAIM` | Both fixtures, as `--existing-claim`; empty means they create their own |
+| `perf_node_selector` | `STORAGE_PERF_NODE_SELECTOR` | `run_storage_test` |
+
+`--set tests.settings.<name>=...` or an `-f` override file replaces the
+environment value. A provider whose `setup_cluster` discovers these from its own
+APIs reports them in a `storage_perf` block (`namespace`, `claim`,
+`node_selector`); a value reported there wins over the setting.
+
+With a claim named, `create_perf_filesystem` reports the volume bound to it and
+`provision_perf_storage` checks that it is Bound, ReadWriteMany and
+Filesystem-mode. Both only read the claim and report `"created": false`, so
+teardown leaves it in place. Neither overwrites a record that says an earlier run
+created a fixture and kept it: run `--phase teardown` first, so that fixture is
+not left behind.
+
 ## Provider fixtures
 
 A provider implements four scripts; the my-isv stubs in
@@ -125,7 +161,8 @@ Set these in your provider config's `tests.settings`, or per run with
 | Setting | Default | Meaning |
 |---|---|---|
 | `perf_node_selector` | `$STORAGE_PERF_NODE_SELECTOR` | Labels of the nodes that run the benchmark, e.g. `storage-test=true` |
-| `perf_namespace` | `storage-perf` | Namespace for the claim |
+| `perf_namespace` | `$STORAGE_PERF_NAMESPACE`, else `storage-perf` | Namespace for the claim |
+| `perf_claim` | `$STORAGE_PERF_CLAIM` | Existing claim to adopt; empty creates one |
 | `perf_nodes` | `1` | Node counts to sweep (storage-scale-test `--nodes` syntax, e.g. `1,2`) |
 | `perf_io_sizes` | `r4K,1M` | IO sizes; an `r` prefix means random IO |
 | `perf_threads` | `1` | Threads per node |
