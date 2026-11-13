@@ -19,22 +19,25 @@
 Teardown safety net. run_storage_test.py records the sweep in --state-file before it submits
 (the results root) and again once submitted (the results directory), and marks it collected
 once its cluster resources are released. When submit was killed before printing the results
-directory, this step finds the sweep as the new elbencho-* directory under the root. If that step was
-stopped first (for example by Ctrl-C), the sweep may still be running and holding the claim's
-Lease, the coordinator Job and the worker DaemonSet. This step cancels it if it is still
-running, then collects it, which is what releases those resources. Like the run step, it
-limits each call itself and needs no isvctl timeout, and it appends its outcome to the run's
-run log.
+directory, this step finds the sweep as the new elbencho-* directory under the root. If that
+step was stopped first (for example by Ctrl-C), the sweep may still be running and holding
+the claim's Lease, the coordinator Job and the worker DaemonSet. This step cancels it if it
+is still running, then collects it, which is what releases those resources. Like the run
+step, it limits each call itself and needs no isvctl timeout, and it appends its outcome to
+the run's run log.
 
 Nothing to do (success) when there is no state file or the sweep was already collected.
 
 It holds the lock beside the state file while it runs. If another run or teardown holds it,
 it touches nothing and reports released false (the sweep is that run's to release). It also
 releases a sweep an earlier run left behind, which is how a run refused over that sweep
-heals: its own teardown releases it. Before acting it checks that the kubeconfig still points
-at the context and server the sweep was submitted to. With --abandon, a sweep it cannot
-release has its record (and interruption marker) renamed aside, so the next run is not
-refused; the step still fails, and says how to release the sweep by hand.
+heals: its own teardown releases it. It uses the run's own kubeconfig copy (deleted once the
+sweep is released) and, before acting, checks that it still points at the context and server
+the sweep was submitted to. It touches nothing while another live isvctl run uses the state
+file's directory (sst.claim_active_run), or when the record cannot be read, or when several
+results directories could be the sweep of a submit that never named its own. With --abandon,
+a sweep it cannot release has its record (and interruption marker) renamed aside, so the next
+run is not refused; the step still fails, and says how to release the sweep by hand.
 
 While such an archived record (state.abandoned-<UTC>.json) exists, its sweep may still use the
 claim and filesystem: the output lists it in abandoned_records, and the fixture teardown steps
@@ -112,7 +115,7 @@ def _validate(args: argparse.Namespace) -> str | None:
 
 
 def _demo_result() -> dict[str, Any]:
-    """Dummy success for ISVCTL_DEMO_MODE=1."""
+    """Return the demo-mode (ISVCTL_DEMO_MODE=1) dummy-success result."""
     return {
         "success": True,
         "platform": "storage",
@@ -148,7 +151,7 @@ def _release(
     """Cancel the sweep if it is still running, then collect it."""
     base = Path(state["scale_test_base"])
     results_dir = state["results_dir"]
-    env = sst.child_env(state.get("kubeconfig"))
+    env = sst.child_env(sst.sweep_kubeconfig(state))
     result: dict[str, Any] = {"results_dir": results_dir, "released": False}
     if not sst.has_attempt(results_dir):
         if state.get("attempt"):
@@ -235,7 +238,8 @@ def _lost_results(state: dict[str, Any]) -> str:
         f"with KUBECONFIG set to the sweep's cluster, run `{launcher} --cancel <copy>` and then "
         f"`{launcher} --collect <copy>`. With no copy left, storage-scale-test cannot release the sweep: "
         "remove what it holds by hand (`kubectl get all,leases,networkpolicies -A "
-        '-l app.kubernetes.io/name=storage-scale-test` lists it), then run teardown with perf_abandon_unreleased: "true"'
+        "-l app.kubernetes.io/name=storage-scale-test` lists it), then run teardown with "
+        'perf_abandon_unreleased: "true"'
     )
 
 
@@ -272,16 +276,20 @@ def _abandon(state_file: str, record: dict[str, Any], result: dict[str, Any]) ->
         marker.replace(marker.with_name(f"{marker.name}.abandoned-{stamp}"))
     results_dir = record.get("results_dir") or record.get("results_root")
     launcher = Path(record["scale_test_base"]) / sst.LAUNCHER
+    # The run's own kubeconfig copy stays: it is how to reach the sweep's cluster by hand.
+    snapshot = record.get("kubeconfig_snapshot")
+    kubeconfig = f"KUBECONFIG={snapshot}" if snapshot else "KUBECONFIG set to the sweep's cluster"
     sst.log(f"abandoned the sweep in {results_dir}; its record is now {archived}")
     result["abandoned"] = True
     result["error"] = (
         f"{result.get('error', 'the sweep was not released')}. Abandoned: the record is now {archived}, so a run "
         "that uses an existing claim can start; a run that would create its fixtures is refused while their "
-        "records are kept. The sweep may still be running and hold cluster resources; with KUBECONFIG set "
-        f"to the sweep's cluster, stop it with `{launcher} --cancel {results_dir}` (or wait until "
+        f"records are kept. The sweep may still be running and hold cluster resources; with {kubeconfig}, "
+        f"stop it with `{launcher} --cancel {results_dir}` (or wait until "
         f"`{launcher} --status {results_dir}` shows it finished), then release it with "
-        f"`{launcher} --collect {results_dir}`. Once you have collected it, delete {archived}: until then "
-        "teardown keeps the claim and filesystem, which the sweep may still use"
+        f"`{launcher} --collect {results_dir}`. Once you have collected it, delete {archived}"
+        + (f" and {snapshot}" if snapshot else "")
+        + ": until then teardown keeps the claim and filesystem, which the sweep may still use"
     )
 
 
@@ -304,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
         return sst.emit({**result, "released": False, "error": f"cannot lock {where}: {exc.strerror or exc}"})
     if lock is None:
         # Its sweep may be running; only the run that holds the lock may cancel it.
-        holder = sst.describe_owner(sst.read_state(args.state_file))
+        holder = sst.describe_owner(sst.peek_state(args.state_file))
         result.update(
             {
                 "released": False,
@@ -329,13 +337,26 @@ def _unreadable(state: dict[str, Any], state_file: str, result: dict[str, Any]) 
 
 def _release_locked(args: argparse.Namespace, result: dict[str, Any]) -> None:
     """main(), once this step holds the state file's lock."""
-    state = sst.read_state(args.state_file)
+    busy = sst.claim_active_run(args.state_file)
+    if busy:
+        # Another live isvctl run's sweep and fixtures; released false keeps the fixtures too.
+        result.update({"released": False, "error": busy})
+        return
+    try:
+        state = sst.read_state(args.state_file)
+    except sst.StateError as exc:
+        # Not abandoned either: nothing in it can be trusted to say how to release a sweep.
+        result.update({"released": False, "error": sst.state_error_message(exc)})
+        return
     if state is None:
         result.update({"success": True, "released": True, "message": "no sweep recorded; nothing to release"})
     elif state.get("collected"):
         result.update({"success": True, "released": True, "message": "already collected; nothing to release"})
     elif sst.record_problem(state, need_base=False):
         _unreadable(state, args.state_file, result)
+    elif not state.get("results_dir") and (candidates := sst.ambiguous_candidates(state)):
+        # Not abandoned either: which sweep to release by hand is the user's call.
+        result.update({"released": False, "error": sst.ambiguous_message(state, candidates, args.state_file)})
     elif not state.get("results_dir") and (unrecorded := sst.find_unrecorded(state)) is None:
         result.update({"success": True, "released": True, "message": "submit created no sweep; nothing to release"})
     elif sst.record_problem(state):
@@ -347,7 +368,8 @@ def _release_locked(args: argparse.Namespace, result: dict[str, Any]) -> None:
         try:
             result.update(_release(record, args.state_file, args, run_log))
         except OSError as exc:
-            # A launcher that cannot run (ToolError names it), or a state file that cannot be written.
+            # A launcher that cannot run (ToolError names it), or a state file that cannot be
+            # written.
             result.update({"released": False, "error": str(exc)})
         finally:
             restore()
@@ -363,6 +385,8 @@ def _release_locked(args: argparse.Namespace, result: dict[str, Any]) -> None:
             run_log.close()
     if result["success"]:
         sst.remove_marker(args.state_file)
+        # Never before: until the sweep is released, the snapshot is how teardown reaches its cluster.
+        sst.remove_snapshot(state, args.state_file)
     abandoned = sst.abandoned_records(args.state_file)
     if abandoned:
         result["abandoned_records"] = abandoned

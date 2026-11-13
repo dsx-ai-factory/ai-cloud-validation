@@ -36,7 +36,7 @@ HEADLINE = {
 
 
 def _evaluate_output(**tests: dict[str, Any]) -> dict[str, Any]:
-    """An evaluate_storage_test output with the given tests and the L1 headline."""
+    """An evaluate_storage_test output with the given tests and a sample headline."""
     return {"step_output": {"success": True, "platform": "storage", "headline": HEADLINE, "tests": tests}}
 
 

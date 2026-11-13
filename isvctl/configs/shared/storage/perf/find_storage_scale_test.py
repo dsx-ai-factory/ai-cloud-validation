@@ -23,8 +23,11 @@ pins. --base points at another tree instead (for example a development checkout)
 writes that tree's env.sh, so dedicate it to isvctl.
 
 With --state-file it also fails setup early, before any fixture is created, when that file
-records a sweep that was never released: the run step would refuse to start anyway, and the
-teardown step, which still runs, releases it. It only reads the file.
+records a sweep that was never released (or cannot be read): the run step would refuse to start
+anyway, and the teardown step, which still runs, releases it. It then marks the file's directory
+as used by this isvctl run (sst.claim_active_run), and fails while another live isvctl run holds
+that mark, so a second run from the same directory stops before setup_cluster repins the
+kubeconfig there.
 
 Usage:
     python find_storage_scale_test.py [--base /path/to/storage-scale-test] [--state-file state.json]
@@ -62,7 +65,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _demo_result() -> dict[str, Any]:
-    """Dummy success for ISVCTL_DEMO_MODE=1."""
+    """Return the demo-mode (ISVCTL_DEMO_MODE=1) dummy-success result."""
     return {
         "success": True,
         "platform": "storage",
@@ -72,6 +75,20 @@ def _demo_result() -> dict[str, Any]:
     }
 
 
+def _claim(state_file: str) -> str | None:
+    """Claim the state file's directory for this isvctl run (sst.claim_active_run); why not, or None."""
+    try:
+        lock = sst.state_lock(state_file)
+        if lock is None:
+            return f"another run or teardown is using {state_file}"
+        try:
+            return sst.claim_active_run(state_file)
+        finally:
+            sst.unlock(lock)
+    except OSError as exc:
+        return f"cannot mark {Path(state_file).parent} as used by this run: {exc.strerror or exc}"
+
+
 def main(argv: list[str] | None = None) -> int:
     """Locate the tree and print the step result."""
     args = _parse_args(argv)
@@ -79,9 +96,18 @@ def main(argv: list[str] | None = None) -> int:
         return sst.emit(_demo_result())
     result: dict[str, Any] = {"success": False, "platform": "storage", "test_name": "find_storage_scale_test"}
     # Read-only: run_storage_test.py makes the same check under the state file's lock.
-    earlier = sst.needs_release(sst.read_state(args.state_file)) if args.state_file else None
+    try:
+        earlier = sst.needs_release(sst.read_state(args.state_file)) if args.state_file else None
+    except sst.StateError as exc:
+        result["error"] = sst.state_error_message(exc)
+        return sst.emit(result)
     if earlier is not None:
         result["error"] = f"{sst.unreleased_message(earlier, args.state_file)}, unless another run is still using it"
+        return sst.emit(result)
+    # Before setup_cluster repins the kubeconfig beside the state file: one run per directory.
+    busy = _claim(args.state_file) if args.state_file else None
+    if busy:
+        result["error"] = busy
         return sst.emit(result)
     base = Path(args.base).expanduser().resolve() if args.base else VENDORED
     if not (base / sst.LAUNCHER).is_file():

@@ -26,12 +26,12 @@ and Filesystem-mode, and that every node matching the sweep's node selector can 
 example a static PersistentVolume for your CSI driver whose volume handle is the filesystem
 ID, plus a claim bound to it. Reusing an existing claim is fine: report "created": false and
 deprovision_perf_storage leaves it alone; --existing-claim (the perf_claim setting) does
-this here, after checking the claim is usable. The sweep writes only under its test path (default
-"scale-test") inside the claim, which must be writable by the benchmark Pods' UID/GID
-(default 2000). With --record the result is also written to that file, so a teardown run on
-its own (`--phase teardown`, which has no setup outputs) still knows what to delete. The
-record also names the kubeconfig and the cluster it points at (context and API server, no
-credentials); deprovision_perf_storage deletes the claim only on that cluster.
+this here, after checking the claim is usable. The sweep writes only under its test path
+(default "scale-test") inside the claim, which must be writable by the benchmark Pods'
+UID/GID (default 2000). With --record the result is also written to that file, so a teardown
+run on its own (`--phase teardown`, which has no setup outputs) still knows what to delete.
+The record also names the kubeconfig and the cluster it points at (context and API server,
+no credentials); deprovision_perf_storage deletes the claim only on that cluster.
 
 Required JSON output fields:
   success     (bool) - true once the claim is Bound
@@ -106,7 +106,7 @@ def main() -> int:
         else:
             result.update({"success": True, "claim_name": args.existing_claim})
     else:
-        result["error"] = "Not implemented - expose the filesystem as a Bound ReadWriteMany PVC"
+        result["error"] = "Not implemented - replace with your platform's claim provisioning logic"
 
     if result["success"] and args.record:
         record = {**result, "kubeconfig": args.kubeconfig}

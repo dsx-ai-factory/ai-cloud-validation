@@ -104,8 +104,11 @@ sweep from submit to release.
 included, to `_output/storage-perf/inputs/kubeconfig` (mode 600; `_output/` is
 git-ignored) and reports it as `kubeconfig_path`. Every later step, and
 storage-scale-test's own `kubectl` calls, use that file, so the run stays on the
-cluster setup checked even if the shell's context changes, and a later
-`--phase teardown` releases the sweep there too. Teardown steps that run without
+cluster setup checked even if the shell's context changes. `run_storage_test`
+copies it once more, to a private file of its own (`inputs/kubeconfig.<random>`,
+mode 600), and drives the sweep through that copy; a later `--phase teardown`
+releases the sweep through the same copy, so it acts on the sweep's cluster even
+after another run repinned `inputs/kubeconfig`. Teardown steps that run without
 `setup_cluster`'s output (`--phase teardown`, or a run refused before setup) use
 that pinned file, never the shell's current context. A provider that creates its
 cluster replaces `setup_cluster` and reports its own `kubeconfig_path`.
@@ -221,7 +224,7 @@ small random IO size gives far higher IOPS and far lower bandwidth than 1M.
 `perf_wait_timeout_s` sets how long the run waits for the sweep. `auto` (the
 default) sizes the wait from the sweep's cells and phase duration, and extends it
 if cells take longer than estimated, up to `perf_wait_cap_s`. A number waits that
-many seconds. `0` sets no wait limit (in earlier versions it meant "check once").
+many seconds. `0` sets no wait limit.
 
 In every mode the run stops waiting if the sweep makes no progress for
 `perf_stall_timeout_s`, if the run cannot read the sweep's state for
@@ -249,9 +252,9 @@ credentials.
 storage-scale-test collects at most 2 GiB (uncompressed) and 50,000 files per
 sweep. Before submitting, the run estimates the size of the per-interval live
 CSVs. It warns above 1 GiB (in the step result and the run log's `estimate`
-line) and refuses above 1.8 GiB. To shrink the estimate,
-raise `perf_live_interval_ms`, set `perf_live_csv_extended: "0"` (no live CSVs),
-or shrink the sweep. It also refuses a sweep of more than 5,624 cells, which would
+line) and refuses above 1.8 GiB. To shrink the estimate, raise
+`perf_live_interval_ms`, set `perf_live_csv_extended: "0"` (no live CSVs), or
+shrink the sweep. It also refuses a sweep of more than 5,624 cells, which would
 exceed the file limit.
 
 Use cluster credentials that stay valid for the whole sweep. If a run is
@@ -304,15 +307,23 @@ earlier sweep, as `--phase teardown` would. Runs from different directories may
 share a storage-scale-test checkout: each holds the checkout's lock while it writes
 `env.sh` and submits, and waits for another run's submit to finish.
 
-The lock is free between a run's `run_storage_test` and its `release_storage_test`.
-A second run started in that gap can release the first run's sweep in its own
-teardown. The first run's teardown then finds it released, or, while the second
-still holds the lock, reports `released: false` and keeps its fixtures for a later
-`--phase teardown`.
+Only one isvctl run may use a directory at a time. `find_storage_scale_test`, the
+first setup step, marks the directory as used by its isvctl process
+(`inputs/active-run`) before `setup_cluster` repins `inputs/kubeconfig`, and fails
+while another live isvctl process holds that mark. So a second run started from
+the same directory stops there, before it can point the first run's later steps at
+another cluster, and its own teardown reports `released: false` and leaves the
+first run's sweep and fixtures alone. A standalone `--phase teardown` marks the
+directory the same way. The mark needs no cleanup: it lapses when its isvctl
+process exits, Ctrl-C included. A mark written on another host (a directory shared
+between machines) cannot be checked, so it blocks until you delete it; the error
+names the file. To run in parallel, start each run from its own directory.
 
-`run_storage_test` also records the kubeconfig's current context and API server.
-`release_storage_test` touches the sweep only while the kubeconfig still points at
-both, since `setup_cluster` repins `inputs/kubeconfig` on every run.
+`run_storage_test` drives the sweep through its own copy of the pinned kubeconfig
+(`inputs/kubeconfig.<random>`, mode 600, named in `state.json` as
+`kubeconfig_snapshot`), and records the copy's current context and API server.
+`release_storage_test` uses the same copy, touches the sweep only while it still
+points at both, and deletes it once the sweep is released.
 
 If a recorded sweep cannot be released (for example the cluster is gone), every
 later run is refused. Set `perf_abandon_unreleased: "true"` and run `--phase
@@ -328,7 +339,13 @@ The abandoned sweep may still use the claim and filesystem, so while any
 that uses an existing claim (`perf_claim`) can start meanwhile; a run that would
 create its fixtures is refused at setup while those records are kept. Once you have
 collected the abandoned sweep with the printed `--collect` command, delete its
-`state.abandoned-<UTC>.json`, and the next `--phase teardown` removes the fixtures.
+`state.abandoned-<UTC>.json` and the kubeconfig copy the message names (the printed
+commands use it), and the next `--phase teardown` removes the fixtures.
+
+`release_storage_test` also refuses, with `released: false`, a `state.json` it
+cannot read (not JSON, not a JSON object, or unreadable), and setup and the run
+refuse it too: it may be a damaged record of a sweep that still holds the claim.
+Abandoning does not apply, since it needs a readable record; see the table below.
 
 ## Results
 
@@ -341,8 +358,10 @@ Each run writes under `_output/storage-perf/` in the directory isvctl runs from:
   including its jq spot checks). `evaluate_storage_test` passes `results_present`
   only when the document's own `batch_outcome.complete` is true.
 - `inputs/` holds the generated target and workload files, the fixture record
-  files, and `state.json`, the sweep's handle for teardown, with its lock file
-  (`.lock`) and, after a Ctrl-C, `interrupted`, the time of the interruption.
+  files, the pinned kubeconfig, and `state.json`, the sweep's handle for teardown,
+  with its lock file (`.lock`), `active-run` (the isvctl run using the directory),
+  the sweep's own kubeconfig copy (`kubeconfig.<random>`) until it is released, and,
+  after a Ctrl-C, `interrupted`, the time of the interruption.
 
 `run_storage_test` writes `state.json` before it submits and again once submit
 prints the results directory, and marks it collected once the sweep's resources
@@ -359,12 +378,15 @@ when the run step was killed, including part-way through submit.
 | The run was interrupted (Ctrl-C), so teardown never ran | The sweep keeps running in-cluster and holds the claim; `inputs/interrupted` records when | Rerun the same command with `--phase teardown` |
 | An earlier sweep was never released (`REFUSED`) | Setup stops before creating anything, and this run's teardown releases the earlier sweep | Nothing if teardown reports `released: true`; rerun. Otherwise fix what its error names and run `--phase teardown`, or abandon the record (see [One run at a time](#one-run-at-a-time)) |
 | Another run or teardown is using the state file (`REFUSED`) | Nothing is submitted; this run's teardown leaves the other run's sweep alone while that run holds the lock | Wait for the other run, or start this one from another directory |
-| The kubeconfig no longer points at the sweep's cluster | `release_storage_test` refuses to act and reports `released: false` | Point the run at the original cluster (or restore `inputs/kubeconfig`) and run `--phase teardown` |
+| Another isvctl run is using this directory | `find_storage_scale_test` fails before `setup_cluster` repins anything; this run's teardown reports `released: false` and leaves the other run's sweep and fixtures alone | Wait for the other run, or start this one from another directory. If the error names a run that is no longer running (for example on a host that is gone), delete `inputs/active-run` |
+| The sweep's kubeconfig copy (`kubeconfig_snapshot` in `state.json`) is missing or no longer points at its cluster | `release_storage_test` refuses to act and reports `released: false` | Put a kubeconfig for the original cluster at that path (mode 600) and run `--phase teardown` |
+| `state.json` cannot be read (not JSON, not a JSON object, or unreadable) | Setup, the run and teardown all refuse and name the file; teardown reports `released: false` | Check whether a sweep still holds cluster resources (`kubectl get all,leases,networkpolicies -A -l app.kubernetes.io/name=storage-scale-test`) and release it by hand from its results directory, then move the file aside |
+| Submit was killed before naming its results directory, and more than one new `elbencho-*` directory appeared since | Teardown does not guess: it reports `released: false` and lists them; setup and the run refuse with the same list | Run `--status` on each listed directory, then `--cancel` (if still running) and `--collect` on this run's sweep, then move `state.json` aside |
 | Cluster API access was lost while waiting | Logged in the run log; the step keeps waiting, since the sweep runs on in-cluster | Nothing, unless access stays lost for `perf_unreachable_grace_s` |
 | Cluster API access stayed lost for `perf_unreachable_grace_s` (`UNREACHABLE`) | `run_storage_test` fails without cancelling or collecting; teardown tries to release the sweep and fails while the cluster is out of reach | Once access is back, run the same command with `--phase teardown` |
 | Cluster API access was lost during submit or teardown | Release fails and says so. What submit created stays in the cluster, holding the claim, until something reaches the cluster again | Once access is back, run `--phase teardown`, or `--status` on the results directory (below) |
-| The machine that ran isvctl is gone, e.g. a CI runner that died mid-sweep | The sweep holds the claim indefinitely: its Lease has no expiry, and storage-scale-test releases it only from the results directory | From any machine with the cluster's kubeconfig, run `--collect` on a copy of the results directory (it need not be at the original path). In CI, keep `_output/storage-perf/results/` as an artifact even when the job fails. Never archive `_output/storage-perf/inputs/`: it holds the pinned kubeconfig and its credentials |
-| The local results directory was deleted while its sweep was still recorded | Setup refuses, and `release_storage_test` reports `released: false`: storage-scale-test releases a sweep only from its results directory | Restore a copy to the recorded path and run `--phase teardown`, or run `--collect` on the copy; with no copy left, remove what the sweep holds by hand, then abandon the record (see [One run at a time](#one-run-at-a-time)) |
+| The machine that ran isvctl is gone, e.g. a CI runner that died mid-sweep | The sweep holds the claim indefinitely: its Lease has no expiry, and storage-scale-test releases it only from the results directory | From any machine with the cluster's kubeconfig, run `--status` on a copy of the results directory (it need not be at the original path). If the sweep is still running, run `--cancel` (again, until `--status` shows it stopped), then `--collect`. In CI, keep `_output/storage-perf/results/` as an artifact even when the job fails. Never archive `_output/storage-perf/inputs/`: it holds the pinned kubeconfig, the sweep's copy of it, and their credentials |
+| The local results directory was deleted while its sweep was still recorded | Setup refuses, and `release_storage_test` reports `released: false`: storage-scale-test releases a sweep only from its results directory | Restore a copy to the recorded path and run `--phase teardown`, or run `--status` on the copy, then `--cancel` (until it stops) if it is still running, then `--collect`; with no copy left, remove what the sweep holds by hand, then abandon the record (see [One run at a time](#one-run-at-a-time)) |
 | Someone cancelled the sweep from outside the run | The run step finishes the cancel and collects it, and fails | Nothing |
 | Submit failed in-cluster (`SUBMISSION_FAILED`) | storage-scale-test already removed what it created; nothing to collect | Read the error in the results directory |
 

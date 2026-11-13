@@ -62,11 +62,18 @@ fi
 # K8S_KUBECONFIG_OUT=<path> pins the cluster for the rest of the run: the current context,
 # credentials included, is written there (mode 600) and reported as kubeconfig_path, so
 # later steps - and tools that call plain kubectl - stay on it even if the shell's context
-# changes. Keep the path somewhere private and out of version control.
+# changes. Keep the path somewhere private and out of version control. The copy is written to a
+# private temp file beside it and moved over it only once complete, so an earlier copy is
+# replaced whole (ending mode 600 whatever its mode was) or, if the write fails, left as it was.
 KUBECONFIG_PATH=""
 if [ -n "${K8S_KUBECONFIG_OUT:-}" ]; then
-    mkdir -p "$(dirname "$K8S_KUBECONFIG_OUT")"
-    if ! (umask 077 && $KUBECTL config view --minify --flatten > "$K8S_KUBECONFIG_OUT"); then
+    KUBECONFIG_DIR="$(dirname "$K8S_KUBECONFIG_OUT")"
+    mkdir -p "$KUBECONFIG_DIR"
+    KUBECONFIG_TMP=""
+    if ! KUBECONFIG_TMP="$(umask 077 && mktemp "$KUBECONFIG_DIR/.kubeconfig.XXXXXX")" \
+        || ! $KUBECTL config view --minify --flatten > "$KUBECONFIG_TMP" \
+        || ! mv -f "$KUBECONFIG_TMP" "$K8S_KUBECONFIG_OUT"; then
+        [ -n "$KUBECONFIG_TMP" ] && rm -f "$KUBECONFIG_TMP"
         echo "Error: could not write the current context's kubeconfig to $K8S_KUBECONFIG_OUT" >&2
         exit 1
     fi

@@ -25,8 +25,8 @@ completely with write and read rates.
 Headline rates are elbencho's [first] figures, the ones storage-scale-test's own reports use.
 
 The floors (--min-mbps, --min-iops) default to 0, which only reports the numbers, as does an
-empty value. A partner sets them to its own expectations. Bandwidth is judged on the slower of the best write and
-best read results, IOPS likewise.
+empty value. A partner sets them to its own expectations. Bandwidth is judged on the slower
+of the best write and best read results, IOPS likewise.
 
 Usage:
     python evaluate_storage_test.py --scale-test-base /path/to/storage-scale-test \\
@@ -112,7 +112,7 @@ def extract_timeout(command_timeout: int, run: dict[str, Any]) -> int:
 
 
 def _demo_result(min_mbps: float, min_iops: float) -> dict[str, Any]:
-    """Dummy success for ISVCTL_DEMO_MODE=1."""
+    """Return the demo-mode (ISVCTL_DEMO_MODE=1) dummy-success result."""
     headline = {
         "write": {"samples": 2, "best_mbps": 180.0, "best_iops": 170.0, "min_avg_latency_ms": 5.0},
         "read": {"samples": 2, "best_mbps": 240.0, "best_iops": 230.0, "min_avg_latency_ms": 4.0},
@@ -182,8 +182,11 @@ def _executions(document: dict[str, Any] | None) -> list[dict[str, Any]]:
     return [e for e in (document or {}).get("executions") or [] if isinstance(e, dict)]
 
 
-def _headline(document: dict[str, Any] | None) -> dict[str, Any]:
-    """Best observed bandwidth and IOPS, and lowest average latency, per operation."""
+def _best(document: dict[str, Any] | None) -> dict[str, Any]:
+    """Best observed bandwidth and IOPS, and lowest average latency, per operation, unrounded.
+
+    The floors and the positivity check compare these; only the headline is rounded.
+    """
     phases = [p for e in _io_executions(document) for p in (e.get("results") or {}).get("phases") or []]
     out: dict[str, Any] = {}
     for op in OPERATIONS:
@@ -195,11 +198,24 @@ def _headline(document: dict[str, Any] | None) -> dict[str, Any]:
         latencies = [lat for lat in latencies if lat > 0]
         out[op] = {
             "samples": len(subset),
-            "best_mbps": round(max(_number(r.get("bytes_per_s")) for r in rates) / 1e6, 1),
-            "best_iops": round(max(_number(r.get("ops_per_s")) for r in rates), 1),
-            "min_avg_latency_ms": round(min(latencies), 3) if latencies else None,
+            "best_mbps": max(_number(r.get("bytes_per_s")) for r in rates) / 1e6,
+            "best_iops": max(_number(r.get("ops_per_s")) for r in rates),
+            "min_avg_latency_ms": min(latencies) if latencies else None,
         }
     return out
+
+
+def _headline(best: dict[str, Any]) -> dict[str, Any]:
+    """_best's numbers as reported: MB/s and IOPS to 0.1, latency to 0.001 ms."""
+    return {
+        op: {
+            "samples": n["samples"],
+            "best_mbps": round(n["best_mbps"], 1),
+            "best_iops": round(n["best_iops"], 1),
+            "min_avg_latency_ms": None if n["min_avg_latency_ms"] is None else round(n["min_avg_latency_ms"], 3),
+        }
+        for op, n in best.items()
+    }
 
 
 def _incomplete_results(document: dict[str, Any] | None) -> list[str]:
@@ -229,10 +245,12 @@ def _floor_test(measured: float | None, floor: float, unit: str) -> dict[str, An
     if measured is None:
         return {**result, "passed": False, "error": "no measurement to compare"}
     passed = measured >= floor
+    # Shown to 0.1, or to as many digits as it takes to agree with the verdict (99.96 < 100).
+    shown = next((round(measured, d) for d in range(1, 7) if (round(measured, d) >= floor) == passed), measured)
     label = {"mbps": "MB/s", "iops": "IOPS"}.get(unit, unit)
     verdict = f"{'>=' if passed else '<'} floor {floor} {label}"
-    message = "report only (no floor set)" if floor == 0 else f"{measured} {label} {verdict}"
-    return {**result, "passed": passed, "message": message}
+    message = "report only (no floor set)" if floor == 0 else f"{shown} {label} {verdict}"
+    return {**result, f"measured_{unit}": shown, "passed": passed, "message": message}
 
 
 def _results_message(document: dict[str, Any] | None, incomplete: list[str], report_error: str | None) -> str:
@@ -258,15 +276,13 @@ def evaluate(
     executions = run.get("executions") if isinstance(run.get("executions"), dict) else {}
     total = executions.get("total")
     complete = run.get("state") == "SUCCESS" and executions.get("failed") == 0 and isinstance(total, int) and total > 0
-    numbers = _headline(document)
+    best = _best(document)
     incomplete = _incomplete_results(document)
     present = (
-        _complete(document)
-        and not incomplete
-        and all(op in numbers and numbers[op]["best_mbps"] > 0 for op in OPERATIONS)
+        _complete(document) and not incomplete and all(op in best and best[op]["best_mbps"] > 0 for op in OPERATIONS)
     )
-    slowest_mbps = min(numbers[op]["best_mbps"] for op in OPERATIONS) if present else None
-    slowest_iops = min(numbers[op]["best_iops"] for op in OPERATIONS) if present else None
+    slowest_mbps = min(best[op]["best_mbps"] for op in OPERATIONS) if present else None
+    slowest_iops = min(best[op]["best_iops"] for op in OPERATIONS) if present else None
     tests = {
         "sweep_complete": {"passed": complete, "message": f"state {run.get('state')}, executions {executions}"},
         "resources_released": {"passed": run.get("resources_released") is True},
@@ -282,7 +298,7 @@ def evaluate(
         "platform": "storage",
         "test_name": "evaluate_storage_test",
         "results_dir": run.get("results_dir"),
-        "headline": numbers,
+        "headline": _headline(best),
         "tests": tests,
     }
     if not result["success"]:
@@ -310,7 +326,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             document, report_error = _load_results(Path(args.scale_test_base), str(run["results_dir"]), timeout)
         except OSError as exc:
-            # An extractor that cannot run (ToolError names it and the likely cause), or an unwritable directory.
+            # An extractor that cannot run (ToolError names it and the likely cause), or an
+            # unwritable directory.
             document, report_error = None, str(exc)
         finally:
             restore()

@@ -25,11 +25,11 @@ removes it in teardown.
 Create the high-speed filesystem (or find an existing one), wait until it is ready to mount,
 and make it reachable from the cluster nodes the sweep will use. Reusing an existing
 filesystem is fine: report "created": false and teardown leaves it alone. With
---existing-claim (the perf_claim setting) this already happens here: the
-filesystem is the volume bound to that claim, and nothing is created. With --record the
-result is also written to that file, so a teardown run on its own (`--phase teardown`, which
-has no setup outputs) still knows what to delete. Given an empty --node-selector it stops
-before creating anything: the sweep runs only on labelled nodes.
+--existing-claim (the perf_claim setting) this already happens here: the filesystem is the
+volume bound to that claim, and nothing is created. With --record the result is also written
+to that file, so a teardown run on its own (`--phase teardown`, which has no setup outputs)
+still knows what to delete. Given an empty --node-selector it stops before creating
+anything: the sweep runs only on labelled nodes.
 
 Required JSON output fields:
   success        (bool) - true once the filesystem is ready to mount
@@ -114,7 +114,7 @@ def main() -> int:
         else:
             result.update({"success": True, "filesystem_id": pvc["spec"]["volumeName"]})
     else:
-        result["error"] = "Not implemented - create the filesystem for the performance sweep"
+        result["error"] = "Not implemented - replace with your platform's filesystem create logic"
 
     if result["success"] and args.record:
         write_record(args.record, result)

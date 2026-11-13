@@ -42,7 +42,7 @@ def _step_output(validation: BaseValidation) -> dict[str, Any]:
 
 
 def _headline(validation: BaseValidation, field: str, unit: str) -> str:
-    """``write 7123.0 MB/s, read 7628.4 MB/s`` from the step's headline, or ``""``."""
+    """Format the step's headline as ``write 7123.0 MB/s, read 7628.4 MB/s``, or ``""``."""
     headline = _step_output(validation).get("headline") or {}
     parts = [f"{op} {numbers[field]} {unit}" for op, numbers in headline.items() if field in numbers]
     return ", ".join(parts)
@@ -62,7 +62,7 @@ def _require(validation: BaseValidation, test_name: str, fail_label: str) -> boo
 
 
 def _floor_message(validation: BaseValidation, test_name: str, field: str, unit: str) -> str:
-    """The measured value against its floor, plus the per-operation figures."""
+    """Format the measured value against its floor, plus the per-operation figures."""
     test = (_step_output(validation).get("tests") or {}).get(test_name, {})
     floor = test.get(f"min_{field}", 0)
     verdict = "report only, no floor set" if not floor else f">= floor {floor} {unit}"

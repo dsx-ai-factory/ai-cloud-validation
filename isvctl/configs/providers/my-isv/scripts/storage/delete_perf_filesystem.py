@@ -37,7 +37,8 @@ With --skip-destroy (STORAGE_SKIP_TEARDOWN=true) nothing is deleted and the reco
 so a later teardown can still remove it.
 
 Usage:
-    python delete_perf_filesystem.py --filesystem-id fs-0123456789 [--created] [--record <path>] [--skip-destroy]
+    python delete_perf_filesystem.py --filesystem-id fs-0123456789 [--created] \\
+        [--record <path>] [--skip-destroy]
 """
 
 import argparse
@@ -83,7 +84,7 @@ def main() -> int:
         print(json.dumps(result, indent=2))
         return 0
     if not args.created:
-        result.update({"success": True, "message": "filesystem was not created by this run; left in place"})
+        result.update({"success": True, "message": "Filesystem was not created by this run; left in place"})
     else:
         # ╔══════════════════════════════════════════════════════════════════╗
         # ║  TODO: Replace this block with your platform's implementation     ║
@@ -96,7 +97,7 @@ def main() -> int:
             result.update({"success": True, "deleted": True, "message": "Filesystem deleted"})
             result["resources_deleted"].append(args.filesystem_id)
         else:
-            result["error"] = "Not implemented - delete the filesystem create_perf_filesystem created"
+            result["error"] = "Not implemented - replace with your platform's filesystem delete logic"
 
     if result["success"] and record:
         record.unlink(missing_ok=True)

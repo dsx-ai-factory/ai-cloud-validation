@@ -87,13 +87,11 @@ def main() -> int:
     }
 
     if args.created and args.skip_destroy:
-        result.update(
-            {"success": True, "message": f"Claim {f'{args.namespace}/{args.claim}'} preserved (--skip-destroy)"}
-        )
+        result.update({"success": True, "message": f"Claim {args.namespace}/{args.claim} preserved (--skip-destroy)"})
         print(json.dumps(result, indent=2))
         return 0
     if not args.created:
-        result.update({"success": True, "message": "claim was not created by this run; left in place"})
+        result.update({"success": True, "message": "Claim was not created by this run; left in place"})
     elif mismatch := other_cluster(recorded.get("cluster"), kubeconfig):
         result["error"] = mismatch
     else:
@@ -109,7 +107,7 @@ def main() -> int:
             result.update({"success": True, "deleted": True, "message": "Claim deleted"})
             result["resources_deleted"].append(f"{args.namespace}/{args.claim}")
         else:
-            result["error"] = "Not implemented - delete the claim provision_perf_storage created"
+            result["error"] = "Not implemented - replace with your platform's claim delete logic"
 
     if result["success"] and record:
         record.unlink(missing_ok=True)

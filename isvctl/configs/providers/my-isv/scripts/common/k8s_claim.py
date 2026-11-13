@@ -52,7 +52,7 @@ def kubectl_command() -> list[str]:
 
 
 def _kubectl(kubeconfig: str) -> tuple[list[str], dict[str, str]]:
-    """The kubectl command (kubectl_command) and its environment, pinned to *kubeconfig* when given."""
+    """Return the kubectl command and its environment, pinned to *kubeconfig* when given."""
     env = dict(os.environ)
     if kubeconfig:
         env["KUBECONFIG"] = os.path.expanduser(kubeconfig)
@@ -82,10 +82,11 @@ def get_claim(kubeconfig: str, namespace: str, name: str) -> tuple[dict[str, Any
 
 
 def cluster_identity(kubeconfig: str) -> dict[str, str] | None:
-    """The context and API server *kubeconfig* (or kubectl's default) points at; None if kubectl cannot say.
+    """Return the context and API server *kubeconfig* (or kubectl's default) points at.
 
-    A local read (``kubectl config view --minify``) that keeps no credential. Both are kept,
-    because a shared access proxy can serve several clusters at one URL.
+    None if kubectl cannot say. A local read (``kubectl config view --minify``) that keeps
+    no credential. Both are kept, because a shared access proxy can serve several clusters
+    at one URL.
     """
     try:
         kubectl, env = _kubectl(kubeconfig)
@@ -109,9 +110,10 @@ def cluster_identity(kubeconfig: str) -> dict[str, str] | None:
 
 
 def other_cluster(recorded: Any, kubeconfig: str) -> str:
-    """Why teardown must not delete with *kubeconfig*: it is not the cluster *recorded* names; else "".
+    """Return why teardown must not delete with *kubeconfig*, or "" when it may.
 
-    A record without a cluster (demo mode, or one kubectl could not read) is not checked.
+    It must not when *kubeconfig* is not the cluster *recorded* names. A record without a
+    cluster (demo mode, or one kubectl could not read) is not checked.
     """
     if not isinstance(recorded, dict):
         return ""
@@ -130,7 +132,7 @@ def other_cluster(recorded: Any, kubeconfig: str) -> str:
 
 
 def claim_problem(pvc: dict[str, Any]) -> str:
-    """Why the sweep cannot use this claim, or "" when it is Bound, ReadWriteMany and Filesystem-mode."""
+    """Return why the sweep cannot use this claim, or "" when it is Bound, RWX and Filesystem-mode."""
     phase = pvc.get("status", {}).get("phase")
     modes = pvc.get("spec", {}).get("accessModes", [])
     volume_mode = pvc.get("spec", {}).get("volumeMode", "Filesystem")
@@ -157,7 +159,7 @@ def recorded_creation(record: str) -> str:
 
 
 def adopt_claim(kubeconfig: str, namespace: str, name: str) -> tuple[dict[str, Any] | None, str]:
-    """The existing claim, when the sweep can use it; else None and why not (get_claim, claim_problem)."""
+    """Return the existing claim when the sweep can use it, else None and why not."""
     pvc, error = get_claim(kubeconfig, namespace, name)
     if pvc is not None:
         error = claim_problem(pvc)

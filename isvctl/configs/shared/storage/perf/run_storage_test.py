@@ -40,8 +40,10 @@ interrupted before it collects, the teardown step (release_storage_test.py) read
 and cancels and collects instead; an interruption is also recorded beside it (`interrupted`).
 The step holds a lock beside the state file while it runs, and refuses (REFUSED) while
 another run or teardown holds it, or while the file records an earlier sweep that was never
-released: this run's teardown step then releases that sweep. It also records the cluster
-(context and server) the sweep runs on, which teardown checks before it acts.
+released: this run's teardown step then releases that sweep. It drives the sweep through its
+own copy of --kubeconfig beside the state file (so a later repin of that file cannot move it),
+and records the copy and the cluster (context and server) it points at, which teardown checks
+before it acts.
 
 Prerequisites: a storage-scale-test checkout (v2.1.0 or later) used only by isvctl, the tools
 it needs (bash 4.4+, kubectl, flock, GNU tar and timeout; isvctl's Python 3.12+), and an existing
@@ -282,7 +284,7 @@ def _plan(args: argparse.Namespace, run_log: sst.RunLog) -> tuple[sst.WaitPlan, 
 
 
 def _demo_result() -> dict[str, Any]:
-    """Dummy success for ISVCTL_DEMO_MODE=1."""
+    """Return the demo-mode (ISVCTL_DEMO_MODE=1) dummy-success result."""
     return {
         "success": True,
         "platform": "storage",
@@ -424,7 +426,7 @@ def _run_sweep(args: argparse.Namespace, result: dict[str, Any], run_log: sst.Ru
     # Held until the step ends: a teardown never acts on a sweep this step is still running.
     lock = sst.state_lock(args.state_file)
     if lock is None:
-        holder = sst.describe_owner(sst.read_state(args.state_file))
+        holder = sst.describe_owner(sst.peek_state(args.state_file))
         result["state"] = REFUSED
         _refuse(
             result,
@@ -443,13 +445,25 @@ def _run_locked(
     args: argparse.Namespace, base: Path, plan: sst.WaitPlan, result: dict[str, Any], run_log: sst.RunLog
 ) -> None:
     """_run_sweep, once this step holds the state file's lock."""
-    earlier = sst.needs_release(sst.read_state(args.state_file))
+    try:
+        state = sst.read_state(args.state_file)
+        earlier = sst.needs_release(state)
+    except sst.StateError as exc:
+        result["state"] = REFUSED
+        _refuse(result, run_log, sst.state_error_message(exc))
+        return
     if earlier is not None:
         # Overwriting the record would leave nothing to release that sweep with.
         result["state"] = REFUSED
         _refuse(result, run_log, sst.unreleased_message(earlier, args.state_file))
         return
-    env = sst.child_env(args.kubeconfig)
+    # The sweep runs on this run's own copy of the pinned kubeconfig (see sst.snapshot_kubeconfig).
+    try:
+        snapshot = sst.snapshot_kubeconfig(args.kubeconfig, args.state_file) if args.kubeconfig else ""
+    except OSError as exc:
+        _refuse(result, run_log, f"cannot copy the kubeconfig {args.kubeconfig}: {exc.strerror or exc}")
+        return
+    env = sst.child_env(snapshot)
     cluster = sst.cluster_identity(env)
     if cluster is None:
         sst.log("warning: cannot read the kubeconfig's context and server; teardown will not check them")
@@ -457,17 +471,20 @@ def _run_locked(
     # read only at submit.
     checkout = sst.checkout_lock(base, args.command_timeout + sst.TERM_GRACE_S + sst.DRAIN_S)
     if checkout is None:
+        sst.remove_snapshot({"kubeconfig_snapshot": snapshot}, args.state_file)
         result["state"] = REFUSED
         _refuse(result, run_log, f"another run is still submitting from {base}; try again once it has")
         return
     try:
         # Recorded before submitting, replacing the earlier (released) record: submit takes the
         # claim's Lease before it prints the results directory, so a submit killed part-way must
-        # still leave teardown a way to find the sweep (the new elbencho-* directory under the root).
+        # still leave teardown a way to find the sweep (the new elbencho-* directory under the
+        # root).
         root = Path(args.results_dir).resolve()
         pending = {
             "scale_test_base": str(base),
             "kubeconfig": args.kubeconfig,
+            "kubeconfig_snapshot": snapshot,
             "results_root": str(root),
             "existing": sorted(p.name for p in root.glob("elbencho-*")),
             "collected": False,
@@ -476,6 +493,8 @@ def _run_locked(
             "cluster": cluster,
         }
         sst.remove_marker(args.state_file)
+        # The record replaced holds nothing (needs_release), so neither does its snapshot.
+        sst.remove_snapshot(state, args.state_file)
         sst.write_state(args.state_file, pending)
         sst.on_interrupt(lambda: sst.write_marker(args.state_file, result.get("results_dir")))
         results_dir, attempt, error = _submit(args, base, env, run_log)
@@ -501,7 +520,8 @@ def _run_locked(
             f"cannot reach the cluster to read the sweep's state "
             f"({status.get('DIAGNOSTIC_REASON') or 'status check timed out'}); it may still be running and "
             f"holds the claim. Teardown tries to release it; once access is back, run the same command with "
-            f"--phase teardown, or `{base / sst.LAUNCHER} --collect {results_dir}`"
+            f"--phase teardown, or run `{base / sst.LAUNCHER} --status {results_dir}`, then `--cancel` (until it "
+            "stops) if it is still running, then `--collect`"
         )
         return
     finished = outcome.verdict == "terminal"
@@ -542,6 +562,7 @@ def _run_locked(
         result["error"] = f"submission failed in-cluster and was rolled back; see {results_dir}"
         result["resources_released"] = True
         sst.write_state(args.state_file, {**handle, "collected": True})
+        sst.remove_snapshot(handle, args.state_file)
         return
     collected = sst.collect(
         base,
@@ -566,6 +587,8 @@ def _run_locked(
     if finished and collected.get("final_status"):
         _finish(result, collected["final_status"])
     sst.write_state(args.state_file, {**handle, "collected": collected["resources_released"]})
+    if collected["resources_released"]:
+        sst.remove_snapshot(handle, args.state_file)
     result["success"] = (
         finished and result.get("state") == TERMINAL_OK and collected["resources_released"] and not error
     )

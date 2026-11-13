@@ -33,6 +33,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -40,6 +41,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+# ISVCTL_DEMO_MODE=1 enables demo-success output (used by `make demo-test`).
 DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
 
 LAUNCHER = Path("storage-tests") / "fs" / "nv-elbencho-sweep.sh"
@@ -151,6 +153,10 @@ MAX_SECONDS = 30 * 24 * 3600
 STATE_LOCK = ".lock"
 CHECKOUT_LOCK = ".isvctl.lock"
 INTERRUPTED = "interrupted"
+# A run's private copy of the pinned kubeconfig, beside the state file (see snapshot_kubeconfig).
+SNAPSHOT_PREFIX = "kubeconfig"
+# The isvctl run using the state file's directory (see claim_active_run).
+ACTIVE_RUN = "active-run"
 # Reading the kubeconfig's current context and server is local; kubectl answers in well under 1 s.
 IDENTITY_TIMEOUT_S = 30
 
@@ -509,7 +515,7 @@ def lifecycle(
     timeout_s: Callable[[], float],
     lock_window_s: float,
 ) -> Ran:
-    """Run ``--status``, ``--cancel`` or ``--collect``, retrying while another command holds the lock.
+    """Run ``--status``, ``--cancel`` or ``--collect``, retrying while the lock is busy.
 
     *timeout_s* and *env* (a dict, or a function returning one) are evaluated before every
     invocation, lock retries included, so a caller with one budget for several calls hands
@@ -646,7 +652,7 @@ def parse_node_spec(spec: str) -> list[int] | None:
 
 
 def count_node_counts(spec: str) -> int | None:
-    """How many node counts parse_node_spec(*spec*) gives, without listing them; None for an unknown spec."""
+    """Count the node counts parse_node_spec(*spec*) gives, without listing them; None if unknown."""
     total = 0
     for element in spec.split(","):
         match = re.fullmatch(r"(\d+)(?:-(\d+)(?:\+(\d+))?)?", element.strip())
@@ -662,7 +668,7 @@ def count_node_counts(spec: str) -> int | None:
 
 
 def count_cells(nodes: str, io_sizes: list[str], threads: list[str], iodepths: list[str]) -> int | None:
-    """The sweep's cells (node counts x IO sizes x threads x IO depths), or None for an unknown spec."""
+    """Count the sweep's cells (node counts x IO sizes x threads x IO depths); None if unknown."""
     node_counts = count_node_counts(nodes)
     if node_counts is None:
         return None
@@ -926,7 +932,8 @@ def wait_for_terminal(
                 # The sweep's own count wins over the one read from the node spec.
                 unread = cells is None
                 cells, initial = total, initial_estimate(total or 0, plan.duration_s)
-                # A node spec it could not read is checked against the cap here instead of before submit.
+                # A node spec it could not read is checked against the cap here instead of
+                # before submit.
                 over_cap = unread and initial > plan.cap_s
             completed = bool(done) and (done or 0) > guards.max_done
             if completed and plan.stall_s is None:
@@ -1188,13 +1195,49 @@ def bash_array(values: list[str]) -> str:
     return "(" + " ".join(bash_quote(v) for v in values) + ")"
 
 
+class StateError(ValueError):
+    """A state file that exists but cannot be read as a record.
+
+    It may be a damaged record of a sweep that still holds cluster resources, so no step takes
+    it for "no sweep recorded".
+    """
+
+    def __init__(self, path: str, reason: str) -> None:
+        """Name the file and why it cannot be read."""
+        super().__init__(f"cannot read {path} ({reason})")
+        self.path = path
+
+
 def read_state(path: str) -> dict[str, Any] | None:
-    """Read the run's state file, or None when there is none (or it is not a JSON object)."""
+    """Read the run's state file; None only when there is none. Raises StateError otherwise."""
     try:
         state = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return None
-    return state if isinstance(state, dict) else None
+    except OSError as exc:
+        raise StateError(path, exc.strerror or str(exc)) from exc
+    except ValueError as exc:
+        raise StateError(path, f"not JSON: {exc}") from exc
+    if not isinstance(state, dict):
+        raise StateError(path, "not a JSON object")
+    return state
+
+
+def peek_state(path: str) -> dict[str, Any] | None:
+    """read_state for messages only: None for a file it cannot read too."""
+    try:
+        return read_state(path)
+    except StateError:
+        return None
+
+
+def state_error_message(exc: StateError) -> str:
+    """Why a step will not act on an unreadable state file, and how to recover."""
+    return (
+        f"{exc}. Not treating it as no sweep: check whether a sweep it may record still holds cluster "
+        "resources (`kubectl get all,leases,networkpolicies -A -l app.kubernetes.io/name=storage-scale-test`), "
+        "release it by hand, then move the file aside (perf_abandon_unreleased cannot: it needs a readable record)"
+    )
 
 
 def record_problem(record: dict[str, Any], need_base: bool = True) -> str | None:
@@ -1203,7 +1246,7 @@ def record_problem(record: dict[str, Any], need_base: bool = True) -> str | None
     Releasing a sweep also needs the checkout it was submitted from (*need_base*); finding
     whether there is one needs only its paths.
     """
-    for key in ("results_dir", "results_root", "kubeconfig", "attempt"):
+    for key in ("results_dir", "results_root", "kubeconfig", "kubeconfig_snapshot", "attempt"):
         if record.get(key) is not None and not isinstance(record[key], str):
             return f"its {key} is not a string"
     if need_base and (not isinstance(record.get("scale_test_base"), str) or not record["scale_test_base"]):
@@ -1218,6 +1261,49 @@ def write_state(path: str, state: dict[str, Any]) -> None:
     tmp = target.with_name(target.name + ".tmp")
     tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
     tmp.replace(target)
+
+
+def snapshot_kubeconfig(kubeconfig: str, state_file: str) -> str:
+    """Copy *kubeconfig* to a new private file of this run's beside *state_file*; return its path.
+
+    The sweep's every call, and teardown's, use the copy, so a later setup_cluster that repins
+    the shared kubeconfig cannot move them to another cluster. Created atomically, mode 600,
+    with a name no other run shares (kubeconfig.<random>); never under the results directory.
+    """
+    data = Path(kubeconfig).read_bytes()
+    fd, path = tempfile.mkstemp(prefix=f"{SNAPSHOT_PREFIX}.", dir=Path(state_file).parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+    except BaseException:
+        Path(path).unlink(missing_ok=True)
+        raise
+    return path
+
+
+def sweep_kubeconfig(record: dict[str, Any]) -> str | None:
+    """The kubeconfig a recorded sweep's commands use: its snapshot, else (older records) the pinned one."""
+    return record.get("kubeconfig_snapshot") or record.get("kubeconfig")
+
+
+def remove_snapshot(record: dict[str, Any] | None, state_file: str) -> None:
+    """Delete the record's kubeconfig snapshot, once its sweep holds nothing.
+
+    Only a file snapshot_kubeconfig could have made (beside the state file), whatever the record says.
+    The state file stops naming the deleted file, so no later reader trusts a path that is gone.
+    """
+    snapshot = (record or {}).get("kubeconfig_snapshot")
+    if not isinstance(snapshot, str) or not snapshot:
+        return
+    path = Path(snapshot)
+    if path.parent == Path(state_file).parent and path.name.startswith(f"{SNAPSHOT_PREFIX}."):
+        path.unlink(missing_ok=True)
+    try:
+        current = read_state(state_file)
+    except StateError:
+        return
+    if current is not None and current.get("kubeconfig_snapshot") == snapshot:
+        write_state(state_file, {key: value for key, value in current.items() if key != "kubeconfig_snapshot"})
 
 
 # ─── Run isolation: locks, the record's owner and cluster, the interruption marker ─────
@@ -1278,13 +1364,38 @@ def describe_owner(state: dict[str, Any] | None) -> str:
     return f"pid {who['pid']} on {who.get('hostname', '?')} since {who.get('started_utc', '?')}"
 
 
+class AmbiguousSweep(Exception):
+    """More than one results directory appeared since a submit that never printed its own."""
+
+    def __init__(self, candidates: list[str]) -> None:
+        """Keep the candidate results directories."""
+        super().__init__(", ".join(candidates))
+        self.candidates = candidates
+
+
 def find_unrecorded(state: dict[str, Any]) -> dict[str, Any] | None:
-    """The record of a sweep whose submit never printed its results directory, if one exists."""
+    """The record of a sweep whose submit never printed its results directory, if one exists.
+
+    That is the one elbencho-* directory created under the root since the record was written.
+    Raises AmbiguousSweep when there are several (another run used the same root): guessing
+    could cancel and collect another run's sweep.
+    """
     root = Path(state.get("results_root") or "")
     if not state.get("results_root") or not root.is_dir():
         return None
     new = sorted(p.name for p in root.glob("elbencho-*") if p.name not in set(state.get("existing") or []))
-    return {**state, "results_dir": str(root / new[-1])} if new else None
+    if len(new) > 1:
+        raise AmbiguousSweep([str(root / name) for name in new])
+    return {**state, "results_dir": str(root / new[0])} if new else None
+
+
+def ambiguous_candidates(state: dict[str, Any]) -> list[str]:
+    """The results directories find_unrecorded cannot choose between; [] when it can choose."""
+    try:
+        find_unrecorded(state)
+    except AmbiguousSweep as exc:
+        return exc.candidates
+    return []
 
 
 def needs_release(state: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1298,6 +1409,8 @@ def needs_release(state: dict[str, Any] | None) -> dict[str, Any] | None:
         return None
     if record_problem(state, need_base=False):
         return state
+    if not state.get("results_dir") and (candidates := ambiguous_candidates(state)):
+        return {**state, "candidates": candidates}
     record = state if state.get("results_dir") else find_unrecorded(state)
     if record is None or not (record.get("attempt") or has_attempt(record["results_dir"])):
         return None
@@ -1356,14 +1469,63 @@ def remove_marker(state_file: str) -> None:
     marker_path(state_file).unlink(missing_ok=True)
 
 
+def run_pid() -> int:
+    """The isvctl process this step belongs to: isvctl starts each step as its own child."""
+    return os.getppid()
+
+
+def _alive(pid: int) -> bool:
+    """Whether process *pid* exists on this host."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def claim_active_run(state_file: str) -> str | None:
+    """Mark the state file's directory as used by this isvctl run; why not, when another run uses it.
+
+    find_storage_scale_test claims it before setup_cluster repins the shared kubeconfig there,
+    and release_storage_test before it acts, so a second run from the same directory stops
+    before it can move the first run's later steps to another cluster, and its teardown leaves
+    the first run alone. Call it holding the state lock. The marker is never removed: it goes
+    stale when its isvctl process exits (Ctrl-C included). One from another host cannot be
+    checked, so it counts as live until deleted.
+    """
+    path = Path(state_file).parent / ACTIVE_RUN
+    try:
+        other = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        other = None
+    me = {"pid": run_pid(), "hostname": socket.gethostname()}
+    if isinstance(other, dict) and isinstance(other.get("pid"), int) and other["pid"] > 0:
+        same_host = other.get("hostname") == me["hostname"]
+        if same_host and other["pid"] == me["pid"]:
+            return None
+        if not same_host or _alive(other["pid"]):
+            return (
+                f"another isvctl run ({describe_owner({'owner': other})}) is using {path.parent}; wait for it "
+                f"to finish, or run from another directory. If it is no longer running, delete {path}"
+            )
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({**me, "started_utc": f"{datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ}"}), encoding="utf-8")
+    tmp.replace(path)
+    return None
+
+
 def abandoned_records(state_file: str) -> list[str]:
-    """The records --abandon moved aside beside *state_file*: sweeps that may still use the fixtures."""
+    """List the records --abandon moved aside beside *state_file* (sweeps that may use the fixtures)."""
     path = Path(state_file)
     return [str(p) for p in sorted(path.parent.glob(f"{path.stem}.abandoned-*{path.suffix}"))]
 
 
 def unreleased_message(record: dict[str, Any], state_file: str) -> str:
     """Why a run refuses to start over a sweep that may still hold cluster resources."""
+    if record.get("candidates"):
+        return ambiguous_message(record, record["candidates"], state_file)
     problem = record_problem(record)
     if problem:
         return (
@@ -1375,4 +1537,17 @@ def unreleased_message(record: dict[str, Any], state_file: str) -> str:
     return (
         f"an earlier sweep (results dir {record['results_dir']}{interrupted}) was not released. "
         "This run's teardown step will try to release it"
+    )
+
+
+def ambiguous_message(record: dict[str, Any], candidates: list[str], state_file: str) -> str:
+    """Why no step releases a sweep find_unrecorded cannot pick out, and how to do it by hand."""
+    base = record.get("scale_test_base")
+    launcher = Path(base) / LAUNCHER if isinstance(base, str) and base else LAUNCHER
+    return (
+        f"{state_file} records a submit that never named its results directory, and {len(candidates)} new "
+        f"results directories appeared since: {', '.join(candidates)}. Not guessing which is its sweep: with "
+        f"KUBECONFIG set to the sweep's cluster, run `{launcher} --status <dir>` on each, then on this run's "
+        f"sweep `{launcher} --cancel <dir>` if it is still running and `{launcher} --collect <dir>`; then move "
+        f"{state_file} aside"
     )

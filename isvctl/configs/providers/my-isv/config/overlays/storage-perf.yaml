@@ -86,7 +86,9 @@ commands:
     steps:
       # The vendored release (`make vendor-storage-scale-test`), or STORAGE_SCALE_TEST_BASE.
       # It also stops setup, before any fixture is created, while the state file records an
-      # earlier sweep that was never released; teardown still runs and releases it.
+      # earlier sweep that was never released (teardown still runs and releases it), or while
+      # another isvctl run uses this directory: one run per directory, so setup_cluster below
+      # never repins the kubeconfig under a run that is still using it.
       - name: find_storage_scale_test
         phase: setup
         command: "python ../../../shared/storage/perf/find_storage_scale_test.py"

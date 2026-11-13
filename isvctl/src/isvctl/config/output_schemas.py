@@ -144,15 +144,6 @@ STEP_SCHEMA_MAPPING: dict[str, str | None] = {
     "backend_switch_fabric_test": "backend_switch_fabric",
     "nvlink_domain": "nvlink_domain",
     "nvlink_domain_test": "nvlink_domain",
-    # Storage performance (config/overlays/storage-perf.yaml and the shared perf steps)
-    "find_storage_scale_test": "storage_perf_tool",
-    "create_perf_filesystem": "storage_perf_filesystem",
-    "provision_perf_storage": "storage_perf_claim",
-    "run_storage_test": "storage_perf_run",
-    "evaluate_storage_test": "storage_perf_evaluate",
-    "release_storage_test": "storage_perf_release",
-    "deprovision_perf_storage": "storage_perf_fixture_teardown",
-    "delete_perf_filesystem": "storage_perf_fixture_teardown",
     "imex_domain": "imex_domain",
     "imex_domain_test": "imex_domain",
     "imex_service": "imex_service",
@@ -185,6 +176,15 @@ STEP_SCHEMA_MAPPING: dict[str, str | None] = {
     "fetch_upstream_k8s_versions": "k8s_upstream_versions",
     "list_k8s_versions": "k8s_offered_versions",
     "describe_control_plane_patching": "k8s_control_plane_patching",
+    # Storage performance (config/overlays/storage-perf.yaml and the shared perf steps)
+    "find_storage_scale_test": "storage_perf_tool",
+    "create_perf_filesystem": "storage_perf_filesystem",
+    "provision_perf_storage": "storage_perf_claim",
+    "run_storage_test": "storage_perf_run",
+    "evaluate_storage_test": "storage_perf_evaluate",
+    "release_storage_test": "storage_perf_release",
+    "deprovision_perf_storage": "storage_perf_fixture_teardown",
+    "delete_perf_filesystem": "storage_perf_fixture_teardown",
 }
 
 # Common fields present in all outputs
@@ -1936,7 +1936,9 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "abandoned_records": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Records --abandon moved aside; their sweeps may still use the fixtures, so teardown keeps them",
+                "description": (
+                    "Records --abandon moved aside; their sweeps may still use the fixtures, so teardown keeps them"
+                ),
             },
             "results_dir": {"type": "string"},
             "message": {"type": "string"},
