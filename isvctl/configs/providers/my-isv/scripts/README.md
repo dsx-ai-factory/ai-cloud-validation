@@ -31,7 +31,7 @@ template, then fill in the TODOs.
 | `control-plane/` | 11 | [`suites/control-plane.yaml`](../../../suites/control-plane.yaml) | [`config/control-plane.yaml`](../config/control-plane.yaml) | [`providers/aws/scripts/control-plane/`](../../aws/scripts/control-plane/) |
 | `vm/` | 12 | [`suites/vm.yaml`](../../../suites/vm.yaml) | [`config/vm.yaml`](../config/vm.yaml) | [`providers/aws/scripts/vm/`](../../aws/scripts/vm/) |
 | `bare_metal/` | 14 | [`suites/bare_metal.yaml`](../../../suites/bare_metal.yaml) | [`config/bare_metal.yaml`](../config/bare_metal.yaml) | [`providers/aws/scripts/bare_metal/`](../../aws/scripts/bare_metal/) |
-| `storage/` | 21 | [`suites/storage.yaml`](../../../suites/storage.yaml) | [`config/storage.yaml`](../config/storage.yaml) | [`providers/aws/scripts/storage/`](../../aws/scripts/storage/) |
+| `storage/` | 25 | [`suites/storage.yaml`](../../../suites/storage.yaml) | [`config/storage.yaml`](../config/storage.yaml) | [`providers/aws/scripts/storage/`](../../aws/scripts/storage/) |
 | `network/` | 24 | [`suites/network.yaml`](../../../suites/network.yaml) | [`config/network.yaml`](../config/network.yaml) | [`providers/aws/scripts/network/`](../../aws/scripts/network/) |
 | `observability/` | 5 | [`suites/observability.yaml`](../../../suites/observability.yaml) | [`config/observability.yaml`](../config/observability.yaml) | [`providers/aws/scripts/observability/`](../../aws/scripts/observability/) |
 | `image-registry/` | 7 | [`suites/image-registry.yaml`](../../../suites/image-registry.yaml) | [`config/image-registry.yaml`](../config/image-registry.yaml) | [`providers/aws/scripts/image-registry/`](../../aws/scripts/image-registry/) |
@@ -50,7 +50,9 @@ dummy-success stub has nothing to return for them.
 > per-test-case scripts: one [`api.py`](storage/api.py) per backend
 > subclasses `StorageApi` and a [provider manifest](../config/overlays/storage-provider-manifest.yaml)
 > declares which `api.py` to load. See [`storage/README.md`](storage/README.md)
-> for the authoring guide.
+> for the authoring guide. The storage performance fixtures are the exception:
+> they are per-step scripts (`storage/*_perf_*.py`), described in the
+> [storage performance guide](../../../../../docs/guides/storage-performance.md#provider-fixtures).
 
 See [`suites/README.md`](../../../suites/README.md) for the per-step / per-field breakdown.
 

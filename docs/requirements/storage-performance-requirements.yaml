@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Storage performance and scale validation requirements - structured source of record.
+# PLACEHOLDER: this file only reserves the source name and prefix and shows the shape. The
+# SPERF* test-plan entries (docs/test-plan.yaml) and matrix rows reference these placeholder
+# requirements; when the official requirements document is onboarded, replace all three together.
+# Render the publishable Markdown view with `make plan`.
+#
+# Scope notes:
+# - These requirements are about RUNNING the benchmark and REPORTING real numbers. They set
+#   no performance bar: target numbers are site-specific and are agreed outside this
+#   repository. A provider may configure its own floors.
+# - The benchmark is storage-scale-test (https://github.com/NVIDIA/storage-scale-test),
+#   vendored by `make vendor-storage-scale-test`.
+# - Status "draft" = proposed for the first release (P0: one Kubernetes IO sweep run to
+#   completion); "planned" = later (P1: batching and the full range of tests).
+
+source: storage-perf-prd
+format: project-prd
+title: Storage Performance and Scale Validation
+version: placeholder-2026-10-27
+requirements:
+  - req_id: SPERF01
+    section: Provider Fixtures
+    area: Filesystem creation
+    description: The provider creates (or supplies) the high-speed filesystem under test through its own API, and removes anything it created when the run ends.
+    status: draft
+  - req_id: SPERF02
+    section: Provider Fixtures
+    area: Filesystem exposed to Kubernetes
+    description: The filesystem is exposed to the cluster as a Bound, ReadWriteMany, Filesystem-mode PersistentVolumeClaim that every node selected for the benchmark can mount.
+    status: draft
+  - req_id: SPERF03
+    section: Execution
+    area: Run to completion
+    description: An IO benchmark sweep runs to completion against the claim within a single validation run, using a pinned release of the benchmark tool.
+    status: draft
+  - req_id: SPERF04
+    section: Execution
+    area: Configurable workload
+    description: The sweep's workload (node counts, IO sizes, threads, IO depth, phase duration) is configurable from the provider configuration without editing the benchmark tool.
+    status: draft
+  - req_id: SPERF05
+    section: Execution
+    area: Resource release
+    description: Every cluster resource the benchmark creates (claim reservation, coordinator, workers, network policies) is released on every exit path, including failure, timeout and interruption of the validation run.
+    status: draft
+  - req_id: SPERF06
+    section: Execution
+    area: Diagnosable failures
+    description: A failed or incomplete sweep reports why and where its results and logs are, so the failure can be investigated.
+    status: draft
+  - req_id: SPERF07
+    section: Results
+    area: Real numbers reported
+    description: A completed sweep reports measured write and read bandwidth and IOPS, and average latency, in machine-readable form.
+    status: draft
+  - req_id: SPERF08
+    section: Results
+    area: Pass criteria
+    description: A run passes when the sweep completed, every cell succeeded, its resources were released and real write and read results were reported. Optional provider-configured floors are applied on top; none is defined here.
+    status: draft
+  - req_id: SPERF09
+    section: Scale
+    area: Multiple targets and workloads
+    description: Several filesystems and workload variants can be tested in one prepared batch, with results reported per target.
+    status: planned
+  - req_id: SPERF10
+    section: Scale
+    area: Metadata performance
+    description: A metadata sweep (create, stat, delete rates) runs to completion and reports real operation rates.
+    status: planned
+  - req_id: SPERF11
+    section: Scale
+    area: Multi-node scaling
+    description: A sweep across increasing node counts reports how bandwidth and IOPS scale with the number of client nodes.
+    status: planned

@@ -1,0 +1,329 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# my-isv Storage Performance Overlay - Living Example
+#
+# Opt-in command overlay for the Performance checks in suites/storage.yaml. Load it after
+# config/storage.yaml; its steps replace that file's step list, so the run does only the
+# performance sweep (run the plain storage config separately for the functional checks):
+#
+#   make vendor   # once (or just this tool: make vendor-storage-scale-test)
+#   uv run isvctl test run \
+#       -f isvctl/configs/providers/my-isv/config/storage.yaml \
+#       -f isvctl/configs/providers/my-isv/config/overlays/storage-perf.yaml \
+#       --capability kubernetes --label performance
+#
+# Commands are relative to the first config file's directory (config/), not this overlay.
+# Guide (settings, floors, time limits, debugging a sweep): docs/guides/storage-performance.md
+#
+# The benchmark steps are shared (isvctl/configs/shared/storage/perf/) and need no changes; a
+# provider implements only the fixtures: setup_cluster (a cluster), create_perf_filesystem /
+# delete_perf_filesystem (the filesystem, via the provider's storage API) and
+# provision_perf_storage / deprovision_perf_storage (a Bound ReadWriteMany PVC for it that the
+# selected nodes can mount). The stubs return dummy success under ISVCTL_DEMO_MODE=1.
+#
+# As shipped, setup_cluster is scripts/k8s/setup.sh: it inventories the cluster kubectl points
+# at, creates nothing, and pins it (a copy of the current context under _output/) for the rest
+# of the run. The perf_* settings name what the sweep uses there, from the environment by
+# default, so a cluster that already mounts the filesystem as a claim runs with no code:
+#
+#   STORAGE_PERF_NAMESPACE=storage-perf STORAGE_PERF_CLAIM=perf-claim \
+#   STORAGE_PERF_NODE_SELECTOR=storage-test=true uv run isvctl test run ...   (as above)
+#
+# The fixtures then adopt that claim and report "created": false, so teardown leaves it alone.
+# K8S_EXPECTED_CONTEXT=<context> makes setup stop unless kubectl points at that context.
+#
+# storage-scale-test is the pinned source release `make vendor-storage-scale-test` (or `make
+# vendor`) extracts into isvtest/vendor/storage-scale-test; elbencho runs in the benchmark Pods
+# from the image that release pins, so nothing else is installed locally.
+# STORAGE_SCALE_TEST_BASE=/path/to/checkout uses another tree instead; isvctl writes that
+# tree's env.sh, so dedicate it to isvctl. Also needed on PATH: bash 4.4+, kubectl, flock,
+# GNU tar and timeout (on macOS: brew install bash coreutils gnu-tar flock; Python comes from uv),
+# and labels on the worker nodes the sweep runs from (STORAGE_PERF_NODE_SELECTOR).
+#
+# The default sweep is a short smoke run (one node, IO sizes r4K and 1M, one thread, IO
+# depth 1, 10 s per phase): it proves the sweep runs and reports real numbers, not
+# sustained performance. Raise the perf_* settings for longer runs. perf_wait_timeout_s
+# "auto" sizes the wait from the sweep (up to perf_wait_cap_s); a number waits that long;
+# "0" sets no limit. In every mode a sweep with no progress for perf_stall_timeout_s ("auto"
+# or seconds), or whose state cannot be read for perf_unreachable_grace_s, stops the wait.
+# The benchmark steps limit every storage-scale-test call themselves (perf_status_timeout_s,
+# perf_collect_timeout_s), so they have no isvctl timeout. Each run logs its progress under
+# _output/storage-perf/results/run-logs/.
+#
+# If a run is interrupted, rerun the same command with `--phase teardown` to release a sweep
+# it left behind. The fixture steps record what they created under _output/, so that
+# teardown also removes the claim and filesystem. A run started while such a sweep is still
+# recorded fails early (REFUSED) and its own teardown releases that sweep; one that cannot be
+# released blocks later runs until perf_abandon_unreleased: "true" moves its record aside.
+# Teardown then keeps the fixtures (and their records, so a run that would create new ones is
+# refused; one using an existing claim can start) until that archived record is deleted, once
+# its sweep has been collected by hand.
+
+version: "1.0"
+
+commands:
+  storage:
+    phases: ["setup", "test", "teardown"]
+    # Arguments are "--flag", "value" pairs, except "--flag=value" where the value can
+    # render empty: isvctl drops an empty argument, which would leave the flag without its
+    # value. A setting given an empty value (`--set tests.settings.perf_claim=`) is null, so
+    # those render through default('', true) rather than as "None". Teardown steps default
+    # every setup output to '' (the kubeconfig to the pinned perf_kubeconfig) so that
+    # `--phase teardown`, which has no setup outputs, still runs them on the run's cluster.
+    steps:
+      # The vendored release (`make vendor-storage-scale-test`), or STORAGE_SCALE_TEST_BASE.
+      # It also stops setup, before any fixture is created, while the state file records an
+      # earlier sweep that was never released (teardown still runs and releases it), or while
+      # another isvctl run uses this directory: one run per directory, so setup_cluster below
+      # never repins the kubeconfig under a run that is still using it.
+      - name: find_storage_scale_test
+        phase: setup
+        command: "python ../../../shared/storage/perf/find_storage_scale_test.py"
+        requires: [kubernetes]
+        args:
+          - "--base={{scale_test_base}}"
+          - "--state-file"
+          - "{{perf_state_file}}"
+        output_schema: storage_perf_tool
+        timeout: 30
+
+      # The current cluster's inventory; it creates nothing. A provider that creates its
+      # cluster replaces this with its own, reporting kubeconfig_path, and may also report
+      # a storage_perf block (namespace, claim, node_selector) from its own APIs. Each
+      # value it leaves out falls back to the matching perf_* setting.
+      - name: setup_cluster
+        phase: setup
+        command: "../scripts/k8s/setup.sh"
+        requires: [kubernetes]
+        # Pin the cluster: every later step, and storage-scale-test's own kubectl calls,
+        # use this copy of the current context, so they cannot follow a context switch.
+        env:
+          K8S_KUBECONFIG_OUT: "{{perf_kubeconfig}}"
+        output_schema: generic
+        timeout: 120
+
+      # Fixtures, not self-contained tests: the filesystem and its claim stay up for the
+      # sweep and are removed in teardown.
+      - name: create_perf_filesystem
+        phase: setup
+        command: "python ../scripts/storage/create_perf_filesystem.py"
+        requires: [kubernetes]
+        args:
+          - "--name"
+          - "{{perf_filesystem_name}}"
+          - "--capacity-gib"
+          - "{{perf_capacity_gib}}"
+          - "--record"
+          - "{{perf_filesystem_record}}"
+          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default('', true)}}"
+          - "--namespace={{steps.setup_cluster.storage_perf.namespace | default(perf_namespace, true) | default('storage-perf', true)}}"
+          - "--existing-claim={{steps.setup_cluster.storage_perf.claim | default(perf_claim, true) | default('', true)}}"
+          # Checked here, the first step after setup_cluster can report one: with no node
+          # selector the sweep cannot run, so nothing is created.
+          - "--node-selector={{steps.setup_cluster.storage_perf.node_selector | default(perf_node_selector, true) | default('', true)}}"
+        output_schema: storage_perf_filesystem
+        timeout: 3600
+
+      - name: provision_perf_storage
+        phase: setup
+        command: "python ../scripts/storage/provision_perf_storage.py"
+        requires: [kubernetes]
+        args:
+          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default('', true)}}"
+          - "--filesystem-id"
+          - "{{steps.create_perf_filesystem.filesystem_id}}"
+          - "--namespace={{steps.setup_cluster.storage_perf.namespace | default(perf_namespace, true) | default('storage-perf', true)}}"
+          - "--record"
+          - "{{perf_claim_record}}"
+          - "--existing-claim={{steps.setup_cluster.storage_perf.claim | default(perf_claim, true) | default('', true)}}"
+        output_schema: storage_perf_claim
+        timeout: 900
+
+      # Submit, wait, collect. continue_on_failure lets evaluate_storage_test report what
+      # a failed sweep left behind.
+      - name: run_storage_test
+        phase: test
+        command: "python ../../../shared/storage/perf/run_storage_test.py"
+        requires: [kubernetes]
+        args:
+          - "--scale-test-base"
+          - "{{steps.find_storage_scale_test.scale_test_base}}"
+          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default('', true)}}"
+          - "--claim"
+          - "{{steps.provision_perf_storage.namespace}}/{{steps.provision_perf_storage.claim_name}}"
+          - "--node-selector={{steps.setup_cluster.storage_perf.node_selector | default(perf_node_selector, true) | default('', true)}}"
+          - "--nodes"
+          - "{{perf_nodes}}"
+          - "--io-sizes"
+          - "{{perf_io_sizes}}"
+          - "--threads"
+          - "{{perf_threads}}"
+          - "--iodepth"
+          - "{{perf_iodepth}}"
+          - "--duration"
+          - "{{perf_duration_s}}"
+          - "--results-dir"
+          - "{{perf_results_dir}}"
+          - "--state-file"
+          - "{{perf_state_file}}"
+          - "--wait-timeout"
+          - "{{perf_wait_timeout_s}}"
+          - "--status-timeout"
+          - "{{perf_status_timeout_s}}"
+          - "--collect-timeout"
+          - "{{perf_collect_timeout_s}}"
+          - "--wait-cap"
+          - "{{perf_wait_cap_s}}"
+          - "--stall-timeout"
+          - "{{perf_stall_timeout_s}}"
+          - "--unreachable-grace"
+          - "{{perf_unreachable_grace_s}}"
+          - "--live-interval-ms"
+          - "{{perf_live_interval_ms}}"
+          - "--live-csv-extended"
+          - "{{perf_live_csv_extended}}"
+        output_schema: storage_perf_run
+        continue_on_failure: true
+        # Bounded by its own limits: the wait, then each call's timeout.
+        timeout: null
+
+      # Final stage: reads the collected reports. Floors of 0 only report the numbers.
+      - name: evaluate_storage_test
+        phase: test
+        command: "python ../../../shared/storage/perf/evaluate_storage_test.py"
+        requires: [kubernetes]
+        args:
+          - "--scale-test-base={{steps.find_storage_scale_test.scale_test_base | default('', true)}}"
+          - "--run={{steps.run_storage_test | default({}, true) | tojson}}"
+          - "--min-mbps={{perf_min_mbps | default('', true)}}"
+          - "--min-iops={{perf_min_iops | default('', true)}}"
+        output_schema: storage_perf_evaluate
+        # The report extractor sets up its own Python environment on first use, then takes
+        # about 1 s per cell; the step limits it to 2 s per cell, at least 1800 s.
+        timeout: null
+
+      # Reads the state file, not run_storage_test's output: a step killed at its
+      # timeout records no output, and that is exactly when this step has work to do.
+      - name: release_storage_test
+        phase: teardown
+        command: "python ../../../shared/storage/perf/release_storage_test.py"
+        requires: [kubernetes]
+        args:
+          - "--state-file"
+          - "{{perf_state_file}}"
+          - "--status-timeout"
+          - "{{perf_status_timeout_s}}"
+          - "--collect-timeout"
+          - "{{perf_collect_timeout_s}}"
+          - "{{ ((perf_abandon_unreleased | string | lower) == 'true') | ternary('--abandon', '') }}"
+        output_schema: storage_perf_release
+        # Bounded by its own limits, like run_storage_test.
+        timeout: null
+
+      - name: deprovision_perf_storage
+        phase: teardown
+        command: "python ../scripts/storage/deprovision_perf_storage.py"
+        requires: [kubernetes]
+        args:
+          # Never the shell's current context: without setup_cluster's output, the pinned copy
+          # (the claim record also names the cluster, and the step refuses another one).
+          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default(perf_kubeconfig, true)}}"
+          - "--namespace={{steps.provision_perf_storage.namespace | default('', true)}}"
+          - "--claim={{steps.provision_perf_storage.claim_name | default('', true)}}"
+          - "{{ '--created' if (steps.provision_perf_storage.created | default(false)) else '' }}"
+          - "--record={{perf_claim_record}}"
+          # --skip-destroy keeps the fixture and its record, so a later teardown can still
+          # remove it, when STORAGE_SKIP_TEARDOWN=true, when release_storage_test did not
+          # confirm the sweep released it, or when it found abandoned sweep records (those
+          # sweeps may still use it): deleting a claim under a sweep leaves the sweep
+          # uncollectable. Inline, not a setting: settings render before any step runs, so a
+          # setting could not see the release's output.
+          - "{{ ((env.STORAGE_SKIP_TEARDOWN == 'true') or ((steps.release_storage_test.released | default(false)) is not sameas true) or (steps.release_storage_test.abandoned_records | default([], true))) | ternary('--skip-destroy', '') }}"
+        output_schema: storage_perf_fixture_teardown
+        timeout: 1800
+
+      - name: delete_perf_filesystem
+        phase: teardown
+        command: "python ../scripts/storage/delete_perf_filesystem.py"
+        requires: [kubernetes]
+        args:
+          - "--filesystem-id={{steps.create_perf_filesystem.filesystem_id | default('', true)}}"
+          - "{{ '--created' if (steps.create_perf_filesystem.created | default(false)) else '' }}"
+          - "--record={{perf_filesystem_record}}"
+          # As deprovision_perf_storage, and also kept unless that step succeeded: a claim
+          # still bound to the filesystem would be left behind.
+          - "{{ ((env.STORAGE_SKIP_TEARDOWN == 'true') or ((steps.release_storage_test.released | default(false)) is not sameas true) or (steps.release_storage_test.abandoned_records | default([], true)) or ((steps.deprovision_perf_storage.success | default(false)) is not sameas true)) | ternary('--skip-destroy', '') }}"
+        output_schema: storage_perf_fixture_teardown
+        timeout: 3600
+
+      # setup_cluster created nothing, so there is nothing to release.
+      - name: teardown_cluster
+        phase: teardown
+        command: "../scripts/k8s/teardown.sh"
+        requires: [kubernetes]
+        timeout: 60
+
+tests:
+  settings:
+    # Empty = the vendored release in isvtest/vendor/storage-scale-test.
+    scale_test_base: "{{env.STORAGE_SCALE_TEST_BASE | default('', true)}}"
+    # What the sweep uses on the cluster, from whoever knows it: the environment, --set,
+    # or an -f override file. A storage_perf value setup_cluster reports wins over these.
+    perf_node_selector: "{{env.STORAGE_PERF_NODE_SELECTOR | default('', true)}}"
+    perf_namespace: "{{env.STORAGE_PERF_NAMESPACE | default('storage-perf', true)}}"
+    # Empty = the fixtures create their own filesystem and claim.
+    perf_claim: "{{env.STORAGE_PERF_CLAIM | default('', true)}}"
+    perf_filesystem_name: "isv-storage-perf"
+    perf_capacity_gib: "1200"
+    # Everything a run generates - its inputs (target and workload files, the sweep handle
+    # teardown reads) and storage-scale-test's results and logs - goes under _output/,
+    # which git ignores, in the directory isvctl runs from.
+    perf_results_dir: "{{env.PWD | default('.', true)}}/_output/storage-perf/results"
+    perf_state_file: "{{env.PWD | default('.', true)}}/_output/storage-perf/inputs/state.json"
+    perf_filesystem_record: "{{env.PWD | default('.', true)}}/_output/storage-perf/inputs/filesystem.json"
+    perf_claim_record: "{{env.PWD | default('.', true)}}/_output/storage-perf/inputs/claim.json"
+    # The pinned copy of the current context (credentials included, mode 600).
+    perf_kubeconfig: "{{env.PWD | default('.', true)}}/_output/storage-perf/inputs/kubeconfig"
+    # Smoke sweep: 2 cells, 10 s per phase.
+    perf_nodes: "1"
+    perf_io_sizes: "r4K,1M"
+    perf_threads: "1"
+    perf_iodepth: "1"
+    perf_duration_s: "10"
+    # Wait for the sweep: "auto" (sized from its cells and phase duration, up to
+    # perf_wait_cap_s), seconds, or "0" (no limit).
+    perf_wait_timeout_s: "auto"
+    perf_wait_cap_s: "43200"
+    # The wait also ends after this long without progress ("auto": three cells' time, at
+    # least 1800 s), or with the sweep's state unreadable for perf_unreachable_grace_s.
+    perf_stall_timeout_s: "auto"
+    perf_unreachable_grace_s: "1800"
+    # elbencho's live statistics: interval, and whether to write the per-interval CSVs
+    # ("1") that fairness reporting reads. They are most of what a long sweep collects.
+    perf_live_interval_ms: "1000"
+    perf_live_csv_extended: "1"
+    # Limits for each storage-scale-test status check, and for collecting a sweep (every
+    # retry together; collect copies the results back, up to 2 GiB).
+    perf_status_timeout_s: "300"
+    perf_collect_timeout_s: "8400"
+    # Report only. Set to your own expectations to enforce a floor; empty also reports only.
+    perf_min_mbps: "0"
+    perf_min_iops: "0"
+    # "true": when teardown cannot release a recorded sweep, move its record aside so the next
+    # run that uses an existing claim can start. Teardown still fails and prints the commands
+    # that release it by hand; later teardowns keep the fixtures until that archived record is
+    # deleted (do that once the sweep is collected).
+    perf_abandon_unreleased: "false"

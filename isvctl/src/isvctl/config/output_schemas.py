@@ -176,6 +176,15 @@ STEP_SCHEMA_MAPPING: dict[str, str | None] = {
     "fetch_upstream_k8s_versions": "k8s_upstream_versions",
     "list_k8s_versions": "k8s_offered_versions",
     "describe_control_plane_patching": "k8s_control_plane_patching",
+    # Storage performance (config/overlays/storage-perf.yaml and the shared perf steps)
+    "find_storage_scale_test": "storage_perf_tool",
+    "create_perf_filesystem": "storage_perf_filesystem",
+    "provision_perf_storage": "storage_perf_claim",
+    "run_storage_test": "storage_perf_run",
+    "evaluate_storage_test": "storage_perf_evaluate",
+    "release_storage_test": "storage_perf_release",
+    "deprovision_perf_storage": "storage_perf_fixture_teardown",
+    "delete_perf_filesystem": "storage_perf_fixture_teardown",
 }
 
 # Common fields present in all outputs
@@ -1784,6 +1793,173 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
         "additionalProperties": True,
+    },
+    # =========================================================================
+    # Storage performance (storage-scale-test sweep)
+    # =========================================================================
+    # Fields later steps read are required only on success, so a failed step's
+    # diagnostics still validate and reach the report.
+    "storage_perf_tool": {
+        "type": "object",
+        "required": ["success", "platform", "test_name"],
+        "properties": {
+            **COMMON_PROPERTIES,
+            "test_name": {"const": "find_storage_scale_test"},
+            "scale_test_base": {"type": "string", "description": "storage-scale-test tree the sweep runs"},
+            "version": {"type": "string", "description": "Its version, as its lib/project_version.sh resolves it"},
+        },
+        "if": {"properties": {"success": {"const": True}}, "required": ["success"]},
+        "then": {"required": ["scale_test_base", "version"]},
+        "additionalProperties": True,
+        "description": "find_storage_scale_test: the storage-scale-test tree to run",
+    },
+    "storage_perf_filesystem": {
+        "type": "object",
+        "required": ["success", "platform"],
+        "properties": {
+            **COMMON_PROPERTIES,
+            "filesystem_id": {"type": "string", "description": "Filesystem under test (consumed by later steps)"},
+            "capacity_gib": {"type": "integer"},
+            "created": {"type": "boolean", "description": "True if this run created it; teardown deletes only those"},
+        },
+        "if": {"properties": {"success": {"const": True}}, "required": ["success"]},
+        "then": {"required": ["filesystem_id", "created"], "properties": {"filesystem_id": {"minLength": 1}}},
+        "additionalProperties": True,
+        "description": "create_perf_filesystem: the provider's filesystem fixture",
+    },
+    "storage_perf_claim": {
+        "type": "object",
+        "required": ["success", "platform"],
+        "properties": {
+            **COMMON_PROPERTIES,
+            "namespace": {"type": "string"},
+            "claim_name": {"type": "string", "description": "Bound ReadWriteMany claim (consumed by later steps)"},
+            "created": {"type": "boolean", "description": "True if this run created it; teardown deletes only those"},
+        },
+        "if": {"properties": {"success": {"const": True}}, "required": ["success"]},
+        "then": {
+            "required": ["namespace", "claim_name", "created"],
+            "properties": {"namespace": {"minLength": 1}, "claim_name": {"minLength": 1}},
+        },
+        "additionalProperties": True,
+        "description": "provision_perf_storage: the claim exposing the filesystem to the cluster",
+    },
+    "storage_perf_run": {
+        "type": "object",
+        "required": ["success", "platform", "test_name", "state", "resources_released"],
+        "properties": {
+            **COMMON_PROPERTIES,
+            "test_name": {"const": "run_storage_test"},
+            "state": {
+                "type": "string",
+                "description": (
+                    "storage-scale-test's STATE (e.g. SUCCESS, FAILED, CANCELLED, SUBMISSION_FAILED), or the run's "
+                    "own: NOT_SUBMITTED (refused or failed before submit), REFUSED (another run holds the state "
+                    "file, or it records an earlier sweep that was not released; teardown releases that one), "
+                    "TIMEOUT (outlived its wait), STALLED (no progress), UNREACHABLE (cluster out of reach; left "
+                    "to teardown), STATUS_FAILED (storage-scale-test could not report the state)"
+                ),
+            },
+            "resources_released": {"type": ["boolean", "null"], "description": "null until submit got that far"},
+            "results_dir": {"type": "string"},
+            "executions": {
+                "type": "object",
+                "properties": {
+                    "total": {"type": "integer", "minimum": 0},
+                    "succeeded": {"type": "integer", "minimum": 0},
+                    "failed": {"type": "integer", "minimum": 0},
+                },
+            },
+            "error": {"type": "string"},
+            "collect_error": {"type": "string"},
+            "failed_execution": {"type": "string"},
+            "failed_log": {"type": "string"},
+            "run_log": {
+                "type": "string",
+                "description": "The run's progress log: one line per status check, cancel and collect",
+            },
+            "warning": {"type": "string", "description": "A large collection that was still submitted"},
+        },
+        "if": {"properties": {"success": {"const": True}}, "required": ["success"]},
+        "then": {
+            "required": ["results_dir", "executions"],
+            "properties": {"state": {"const": "SUCCESS"}, "resources_released": {"const": True}},
+        },
+        "additionalProperties": True,
+        "description": "run_storage_test: submit, wait for and collect a storage-scale-test sweep",
+    },
+    "storage_perf_evaluate": {
+        "type": "object",
+        "required": ["success", "platform", "test_name"],
+        "properties": {
+            **COMMON_PROPERTIES,
+            "test_name": {"const": "evaluate_storage_test"},
+            "results_dir": {"type": ["string", "null"]},
+            "headline": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "object",
+                    "required": ["samples", "best_mbps", "best_iops"],
+                    "properties": {
+                        "samples": {"type": "integer", "minimum": 0},
+                        "best_mbps": {"type": "number"},
+                        "best_iops": {"type": "number"},
+                        "min_avg_latency_ms": {"type": ["number", "null"]},
+                    },
+                },
+            },
+            "tests": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "object",
+                    "required": ["passed"],
+                    "properties": {"passed": {"type": "boolean"}},
+                },
+            },
+        },
+        "if": {"properties": {"success": {"const": True}}, "required": ["success"]},
+        "then": {"required": ["headline", "tests"]},
+        "additionalProperties": True,
+        "description": "evaluate_storage_test: headline numbers and pass/fail per test",
+    },
+    "storage_perf_release": {
+        "type": "object",
+        "required": ["success", "platform", "test_name", "released"],
+        "properties": {
+            **COMMON_PROPERTIES,
+            "test_name": {"const": "release_storage_test"},
+            "released": {"type": "boolean", "description": "The sweep holds no cluster resources"},
+            "abandoned": {
+                "type": "boolean",
+                "description": "The unreleased sweep's record was moved aside (--abandon); it may still hold resources",
+            },
+            "abandoned_records": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Records --abandon moved aside; their sweeps may still use the fixtures, so teardown keeps them"
+                ),
+            },
+            "results_dir": {"type": "string"},
+            "message": {"type": "string"},
+            "error": {"type": "string"},
+        },
+        "additionalProperties": True,
+        "description": "release_storage_test: release a sweep the run step did not collect",
+    },
+    "storage_perf_fixture_teardown": {
+        "type": "object",
+        "required": ["success", "platform"],
+        "properties": {
+            **COMMON_PROPERTIES,
+            "deleted": {"type": "boolean"},
+            "resources_deleted": {"type": "array", "items": {"type": "string"}},
+            "message": {"type": "string"},
+        },
+        "if": {"properties": {"success": {"const": True}}, "required": ["success"]},
+        "then": {"required": ["deleted"]},
+        "additionalProperties": True,
+        "description": "deprovision_perf_storage / delete_perf_filesystem: remove what setup created",
     },
 }
 

@@ -17,6 +17,8 @@ reconciles all of these different goals.
 | `storage-acceptance-requirements.md` | Generated rendering of the storage YAML (`make plan`). |
 | `network-operator-readiness-requirements.yaml` | **Source of record** for the Enterprise RA Network Operator self-validation integration PRD. |
 | `network-operator-readiness-requirements.md` | Generated rendering of the Network Operator PRD YAML (`make plan`). |
+| `storage-performance-requirements.yaml` | **Source of record** for the storage performance and scale validation requirements (placeholder until the official document is onboarded). |
+| `storage-performance-requirements.md` | Generated rendering of the storage performance YAML (`make plan`). |
 | `test-requirements-matrix.yaml` | The **traceability matrix (index)**: which requirement(s) each test relates to, across documents (`source`). |
 | `test-requirements-matrix.adoc` | Generated and committed traceability matrix, viewable in github (or renderable to html) |
 | `../../scripts/reqtrace.py` | Integrity checks (`reqtrace validate`; `make reqcheck`). |
@@ -102,6 +104,7 @@ test `K8S32-01` is now `K8S42-01` (`legacy_ids` keeps `K8S32-01`).
 | `BENCH` | reference | exemplar benchmarking |
 | `N-*` | storage | Storage Acceptance test IDs |
 | `ENT-REQ-*` | network-operator-prd | Enterprise Network Operator self-validation integration |
+| `SPERF` | storage-perf-prd | Storage performance and scale validation (storage-scale-test) |
 
 ## 3. `legacy_ids`
 

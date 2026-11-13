@@ -24,7 +24,8 @@
 #
 # Unlike the other my-isv examples this one talks to a REAL cluster: the
 # validations run kubectl directly, so there is nothing for a dummy-success
-# stub to return. That is why it is not part of `make demo-test`.
+# stub to return. That is why it is not part of `make demo-test` (setup.sh does
+# answer ISVCTL_DEMO_MODE=1 with a sample inventory, for the storage performance demo).
 #
 # ACTION: point KUBECTL at your cluster (or make `kubectl` resolve to it),
 #   then replace scripts/k8s/setup.sh with your own provisioning if you want
@@ -32,6 +33,7 @@
 #
 # Environment Variables:
 #   - KUBECTL: kubectl-compatible CLI prefix (defaults to kubectl, then microk8s kubectl)
+#   - K8S_EXPECTED_CONTEXT: if set, setup.sh stops unless kubectl's current context matches
 #   - NGC_API_KEY: NGC API key for NIM workloads
 
 import: ../../../suites/k8s.yaml

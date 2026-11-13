@@ -152,6 +152,25 @@ ISVCTL_DEMO_MODE=1 \
   uv run isvctl test run -f isvctl/configs/providers/my-isv/config/storage.yaml
 ```
 
+## Storage performance fixtures
+
+The storage performance sweep does not use the shim. Its four setup and
+teardown steps are per-step scripts in this directory, wired by
+[`config/overlays/storage-perf.yaml`](../../config/overlays/storage-perf.yaml):
+
+| Script | Phase | What you implement |
+|---|---|---|
+| `create_perf_filesystem.py` | setup | Create the filesystem under test, or report one to reuse |
+| `provision_perf_storage.py` | setup | A Bound, ReadWriteMany, Filesystem-mode claim for it |
+| `deprovision_perf_storage.py` | teardown | Delete the claim, only if setup created it |
+| `delete_perf_filesystem.py` | teardown | Delete the filesystem, only if setup created it |
+
+Each has a TODO block and demo mode like the other my-isv scripts. Keep the
+record-file handling and the cluster check around the TODO blocks; they come
+from [`common/k8s_claim.py`](../common/k8s_claim.py). The
+[storage performance guide](../../../../../../docs/guides/storage-performance.md#provider-fixtures)
+gives the full contract.
+
 ## What ships at handover
 
 Once your `api.py` is real, the production delivery bundles:

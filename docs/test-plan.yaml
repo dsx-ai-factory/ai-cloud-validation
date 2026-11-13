@@ -3169,6 +3169,95 @@ domains:
                 test_id: HSS11-04
                 actor: tenant
                 status: published
+      - name: Storage Performance
+        capabilities:
+          - description: IO benchmark sweep (storage-scale-test) against a provider filesystem, reporting real bandwidth, IOPS and latency
+            example: storage-scale-test elbencho sweep on Kubernetes
+            tests:
+              - summary: Verify the provider creates (or supplies) the high-speed filesystem under test
+                labels:
+                  - kubernetes
+                  - performance
+                  - storage
+                priority: P1
+                milestone: ""
+                notes: "Placeholder id; replace when the official storage performance requirements and test list are onboarded."
+                req_id: SPERF01
+                test_id: SPERF01-01
+                actor: tenant
+                status: pending
+              - summary: Verify the filesystem is exposed to the cluster as a Bound ReadWriteMany claim
+                labels:
+                  - kubernetes
+                  - performance
+                  - storage
+                priority: P1
+                milestone: ""
+                notes: "Placeholder id; replace when the official storage performance requirements and test list are onboarded."
+                req_id: SPERF02
+                test_id: SPERF02-01
+                actor: tenant
+                status: pending
+              - summary: Verify a storage-scale-test IO sweep runs to completion against the claim
+                labels:
+                  - kubernetes
+                  - performance
+                  - storage
+                priority: P1
+                milestone: ""
+                notes: "Placeholder id; replace when the official storage performance requirements and test list are onboarded."
+                req_id: SPERF03
+                test_id: SPERF03-01
+                actor: tenant
+                status: pending
+              - summary: Verify the sweep releases every cluster resource it held
+                labels:
+                  - kubernetes
+                  - performance
+                  - storage
+                priority: P1
+                milestone: ""
+                notes: "Placeholder id; replace when the official storage performance requirements and test list are onboarded."
+                req_id: SPERF05
+                test_id: SPERF05-01
+                actor: tenant
+                status: pending
+              - summary: Verify the sweep reports complete write and read results
+                labels:
+                  - kubernetes
+                  - performance
+                  - storage
+                priority: P1
+                milestone: ""
+                notes: "Placeholder id; replace when the official storage performance requirements and test list are onboarded."
+                req_id: SPERF07
+                test_id: SPERF07-01
+                actor: tenant
+                status: pending
+              - summary: Verify measured bandwidth meets the configured floor
+                labels:
+                  - kubernetes
+                  - performance
+                  - storage
+                priority: P1
+                milestone: ""
+                notes: "Placeholder id; replace when the official storage performance requirements and test list are onboarded."
+                req_id: SPERF08
+                test_id: SPERF08-01
+                actor: tenant
+                status: pending
+              - summary: Verify measured IOPS meets the configured floor
+                labels:
+                  - kubernetes
+                  - performance
+                  - storage
+                priority: P1
+                milestone: ""
+                notes: "Placeholder id; replace when the official storage performance requirements and test list are onboarded."
+                req_id: SPERF08
+                test_id: SPERF08-02
+                actor: tenant
+                status: pending
       - name: Object Storage Service
         capabilities:
           - description: durable, scalable object storage for things like datasets, model artifacts, logs, backups.

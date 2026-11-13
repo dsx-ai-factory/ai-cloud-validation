@@ -3,7 +3,7 @@ DEMO_TARGETS := $(addprefix demo-,$(MY_ISV_SUITES))
 
 .PHONY: help pre-commit build test coverage clean lint format install bump-patch bump-fix bump-minor bump-feat bump-major bump bump-check \
 	security-trivy security-trivy-detail security-trufflehog ci-security demo-test demo-all $(DEMO_TARGETS) plan plan-coverage validate-suites \
-	reqcheck vendor-pjdfstest
+	reqcheck vendor vendor-pjdfstest vendor-storage-scale-test clean-vendor
 
 PACKAGES := isvctl isvreporter isvtest
 BUMP_SCRIPT := scripts/bump-version.py
@@ -14,6 +14,13 @@ RUFF := uvx --from ruff==$(RUFF_VERSION) ruff
 PJDFSTEST_REPO := https://github.com/pjd/pjdfstest.git
 PJDFSTEST_REV := ededbeb2b44929972898afb87474b0937f78a877
 PJDFSTEST_DIR := isvtest/vendor/pjdfstest
+
+# Vendored storage-scale-test (source release; the Kubernetes sweep runs elbencho from the image the release pins)
+STORAGE_SCALE_TEST_VERSION := v2.1.0
+STORAGE_SCALE_TEST_SHA256 := 35d8c5085da51f4cc1822e02fa89c3228fb9e1b83e480506bea80f4ab201472f
+STORAGE_SCALE_TEST_TARBALL := storage-scale-test-$(STORAGE_SCALE_TEST_VERSION)-source.tar.gz
+STORAGE_SCALE_TEST_URL := https://github.com/NVIDIA/storage-scale-test/releases/download/$(STORAGE_SCALE_TEST_VERSION)/$(STORAGE_SCALE_TEST_TARBALL)
+STORAGE_SCALE_TEST_DIR := isvtest/vendor/storage-scale-test
 
 # DISABLED (2026-03-24): Trivy supply chain compromise - see GHSA-69fq-xp46-6x23.
 # Do NOT pull aquasec/trivy images from Docker Hub until Aqua Security regains control.
@@ -121,9 +128,9 @@ demo-all: ## Run all my-isv living examples (or demo-<suite> for one, e.g. demo-
 	@echo "✅ All my-isv living examples passed in demo mode!"
 	@echo "Suites: $(MY_ISV_SUITES)"
 
-# image-registry is excluded here because it has its own rule below; leaving it
-# in would make every make invocation warn about an overridden recipe.
-$(filter-out demo-image-registry,$(DEMO_TARGETS)): demo-%:
+# image-registry and storage are excluded here because they have their own rules
+# below; leaving them in would make every make invocation warn about an overridden recipe.
+$(filter-out demo-image-registry demo-storage,$(DEMO_TARGETS)): demo-%:
 	$(call run_demo,$*,$(DEMO_CAP_$*))
 
 # image-registry splits its gated checks between vm and bare_metal, so one run
@@ -131,6 +138,21 @@ $(filter-out demo-image-registry,$(DEMO_TARGETS)): demo-%:
 demo-image-registry:
 	$(call run_demo,image-registry,vm)
 	$(call run_demo,image-registry,bare_metal)
+
+# storage also runs its opt-in performance overlay, which replaces the step list, so it
+# is a second run. --label performance keeps the suite's live Kubernetes probes out, and
+# KUBECONFIG=/dev/null keeps the demo off whatever cluster the shell points at.
+demo-storage:
+	$(call run_demo,storage,$(DEMO_CAP_storage))
+	@echo ""
+	@echo "=========================================="
+	@echo "Demo test: storage + overlays/storage-perf.yaml --capability kubernetes --label performance"
+	@echo "=========================================="
+	@echo "Running cmd: ISVCTL_DEMO_MODE=1 KUBECONFIG=/dev/null uv run isvctl test run -f isvctl/configs/providers/my-isv/config/storage.yaml -f isvctl/configs/providers/my-isv/config/overlays/storage-perf.yaml --capability kubernetes --label performance"
+	@ISVCTL_DEMO_MODE=1 KUBECONFIG=/dev/null uv run isvctl test run \
+		-f isvctl/configs/providers/my-isv/config/storage.yaml \
+		-f isvctl/configs/providers/my-isv/config/overlays/storage-perf.yaml \
+		--capability kubernetes --label performance
 
 coverage: ## Run tests with coverage and generate combined report
 	@echo "Running tests with coverage..."
@@ -228,11 +250,37 @@ plan-coverage: ## Report test-plan coverage + gaps via wired test_ids (CHECK=1 f
 validate-suites: ## Require test_id and labels on every suite check (CHECK=1 for CI/pre-commit)
 	@uv run python scripts/validate_suite_wiring.py $(if $(CHECK),--check,)
 
+vendor: vendor-pjdfstest vendor-storage-scale-test ## Download every pinned third-party test tool into isvtest/vendor/
+
+clean-vendor: ## Remove the vendored test tools (`make vendor` downloads them again)
+	@rm -rf $(PJDFSTEST_DIR) $(STORAGE_SCALE_TEST_DIR) $(STORAGE_SCALE_TEST_DIR).tmp
+	@echo "✅ Removed $(PJDFSTEST_DIR) and $(STORAGE_SCALE_TEST_DIR)"
+
 vendor-pjdfstest: ## Download pinned pjdfstest source into isvtest/vendor/ (gitignored; required by K8sPosixComplianceCheck)
 	@rm -rf $(PJDFSTEST_DIR)
 	@git clone --quiet $(PJDFSTEST_REPO) $(PJDFSTEST_DIR)
 	@git -C $(PJDFSTEST_DIR) checkout --quiet $(PJDFSTEST_REV)
 	@echo "✅ Vendored pjdfstest @ $(PJDFSTEST_REV) -> $(PJDFSTEST_DIR)"
+
+vendor-storage-scale-test: ## Download pinned storage-scale-test release into isvtest/vendor/ (gitignored; required by the storage performance checks)
+	@command -v sha256sum >/dev/null || command -v shasum >/dev/null \
+		|| { echo "❌ need sha256sum or shasum to verify $(STORAGE_SCALE_TEST_TARBALL)"; exit 1; }
+	@rm -rf $(STORAGE_SCALE_TEST_DIR).tmp && mkdir -p $(STORAGE_SCALE_TEST_DIR).tmp
+	@curl -fsSL --retry 3 -o $(STORAGE_SCALE_TEST_DIR).tmp/$(STORAGE_SCALE_TEST_TARBALL) $(STORAGE_SCALE_TEST_URL) \
+		|| { rm -rf $(STORAGE_SCALE_TEST_DIR).tmp; echo "❌ could not download $(STORAGE_SCALE_TEST_URL)"; exit 1; }
+	@sha=$$(command -v sha256sum >/dev/null && echo sha256sum || echo "shasum -a 256"); \
+		echo "$(STORAGE_SCALE_TEST_SHA256)  $(STORAGE_SCALE_TEST_DIR).tmp/$(STORAGE_SCALE_TEST_TARBALL)" | $$sha -c --quiet - \
+		|| { rm -rf $(STORAGE_SCALE_TEST_DIR).tmp; echo "❌ $(STORAGE_SCALE_TEST_TARBALL) checksum mismatch"; exit 1; }
+	@tar -xzf $(STORAGE_SCALE_TEST_DIR).tmp/$(STORAGE_SCALE_TEST_TARBALL) -C $(STORAGE_SCALE_TEST_DIR).tmp --strip-components=1 --no-same-owner \
+		|| { rm -rf $(STORAGE_SCALE_TEST_DIR).tmp; echo "❌ could not extract $(STORAGE_SCALE_TEST_TARBALL)"; exit 1; }
+	@rm -f $(STORAGE_SCALE_TEST_DIR).tmp/$(STORAGE_SCALE_TEST_TARBALL)
+	@version=$$(bash $(STORAGE_SCALE_TEST_DIR).tmp/lib/project_version.sh resolve $(STORAGE_SCALE_TEST_DIR).tmp); \
+		[ "$$version" = "$(STORAGE_SCALE_TEST_VERSION)" ] \
+		|| { rm -rf $(STORAGE_SCALE_TEST_DIR).tmp; echo "❌ extracted storage-scale-test reports version $$version, expected $(STORAGE_SCALE_TEST_VERSION)"; exit 1; }
+	@rm -rf $(STORAGE_SCALE_TEST_DIR) && mv $(STORAGE_SCALE_TEST_DIR).tmp $(STORAGE_SCALE_TEST_DIR)
+	@out=$$(uv run python $(STORAGE_SCALE_TEST_DIR)/lib/python_bootstrap.py $(STORAGE_SCALE_TEST_DIR) 2>&1) \
+		|| { echo "$$out"; echo "❌ could not prepare storage-scale-test's Python environment"; exit 1; }
+	@echo "✅ Vendored storage-scale-test @ $(STORAGE_SCALE_TEST_VERSION) -> $(STORAGE_SCALE_TEST_DIR)"
 
 .PHONY: changelog-fill
 changelog-fill: ## Fill CHANGELOG.md gaps via an LLM CLI (CLI=auto|cursor|codex|claude)

@@ -1,7 +1,23 @@
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# Kubernetes networking probes
+# Kubernetes scripts
+
+## Cluster inventory: setup.sh
+
+`setup.sh` (with `_common.sh`) inventories the cluster kubectl points at and prints it
+as JSON; it creates nothing, and `teardown.sh` is the matching no-op. The storage
+suite's `setup_cluster` step uses it by default. It reads these variables:
+
+| Variable | Effect |
+|---|---|
+| `KUBECTL` | kubectl-compatible CLI prefix (default `kubectl`, then `microk8s kubectl`) |
+| `K8S_EXPECTED_CONTEXT` | Stop unless kubectl's current context is this one |
+| `K8S_CSI_BLOCK_SC`, `K8S_CSI_SHARED_FS_SC`, `K8S_CSI_NFS_SC` | StorageClass names in the `csi` block, instead of auto-detection |
+| `K8S_KUBECONFIG_OUT` | Write the current context, credentials included, to this path (mode 600) and report it as `kubeconfig_path`, pinning the cluster for later steps; the [storage performance](../../../../../../docs/guides/storage-performance.md) overlay sets it |
+| `ISVCTL_DEMO_MODE=1` | Print a sample inventory without contacting a cluster |
+
+## Networking probes
 
 For managed control-plane and node-pool upgrade evidence, see
 [Kubernetes upgrade checks](../../../../../../docs/references/kubernetes-upgrades.md).

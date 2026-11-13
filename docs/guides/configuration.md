@@ -915,7 +915,7 @@ isvctl test run -f config.yaml -- -k "vpc_crud"
 isvctl test run -f config.yaml --label kubernetes
 ```
 
-Available labels: `bare_metal`, `vm`, `kubernetes`, `slurm`, `gpu`, `network`, `ssh`, `security`, `iam`, `workload`, `slow`
+Available labels: `bare_metal`, `vm`, `kubernetes`, `slurm`, `gpu`, `network`, `ssh`, `security`, `iam`, `workload`, `storage`, `offtake`, `performance`, `slow`
 
 ## Related Documentation
 
