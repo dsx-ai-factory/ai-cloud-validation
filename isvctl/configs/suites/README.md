@@ -346,9 +346,9 @@ schema. See [Storage Performance](../../../docs/guides/storage-performance.md).
 | `setup_cluster` | setup | `providers/my-isv/scripts/k8s/setup.sh` | `kubeconfig_path` (pinned copy of the current context); optional `storage_perf.{namespace,claim,node_selector}` |
 | `create_perf_filesystem` | setup | `providers/my-isv/scripts/storage/create_perf_filesystem.py` | `filesystem_id`, `created` |
 | `provision_perf_storage` | setup | `providers/my-isv/scripts/storage/provision_perf_storage.py` | `namespace`, `claim_name`, `created` |
-| `run_storage_test` | test | `shared/storage/perf/run_storage_test.py` | `state`, `results_dir`, `executions`, `resources_released` |
+| `run_storage_test` | test | `shared/storage/perf/run_storage_test.py` | `state`, `results_dir`, `executions`, `resources_released`, `run_log`, `warning` (large collection) |
 | `evaluate_storage_test` | test | `shared/storage/perf/evaluate_storage_test.py` | `headline`, `tests.{results_present,bandwidth_meets_min,iops_meets_min}` |
-| `release_storage_test` | teardown | `shared/storage/perf/release_storage_test.py` | `released` |
+| `release_storage_test` | teardown | `shared/storage/perf/release_storage_test.py` | `released`, `abandoned` (record moved aside) |
 | `deprovision_perf_storage` | teardown | `providers/my-isv/scripts/storage/deprovision_perf_storage.py` | `deleted`, `resources_deleted`, `message` |
 | `delete_perf_filesystem` | teardown | `providers/my-isv/scripts/storage/delete_perf_filesystem.py` | `deleted`, `resources_deleted`, `message` |
 

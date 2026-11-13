@@ -50,7 +50,9 @@ dummy-success stub has nothing to return for them.
 > per-test-case scripts: one [`api.py`](storage/api.py) per backend
 > subclasses `StorageApi` and a [provider manifest](../config/overlays/storage-provider-manifest.yaml)
 > declares which `api.py` to load. See [`storage/README.md`](storage/README.md)
-> for the authoring guide.
+> for the authoring guide. The storage performance fixtures are the exception:
+> they are per-step scripts (`storage/*_perf_*.py`), described in the
+> [storage performance guide](../../../../../docs/guides/storage-performance.md#provider-fixtures).
 
 See [`suites/README.md`](../../../suites/README.md) for the per-step / per-field breakdown.
 
