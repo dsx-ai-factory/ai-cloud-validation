@@ -24,8 +24,8 @@ completely with write and read rates.
 
 Headline rates are elbencho's [first] figures, the ones storage-scale-test's own reports use.
 
-The floors (--min-mbps, --min-iops) default to 0, which only reports the numbers. A partner
-sets them to its own expectations. Bandwidth is judged on the slower of the best write and
+The floors (--min-mbps, --min-iops) default to 0, which only reports the numbers, as does an
+empty value. A partner sets them to its own expectations. Bandwidth is judged on the slower of the best write and
 best read results, IOPS likewise.
 
 Usage:
@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -63,17 +64,51 @@ import sst
 OPERATIONS = ("write", "read")
 RESULTS_JSON = "results.json"
 RESULTS_SCHEMA = "storage-scale-test/filesystem-batch-results"
+# The extractor's default limit: EXTRACT_S_PER_CELL per cell of the sweep, at least
+# EXTRACT_FLOOR_S. It takes about 1 s per cell, plus setting up its Python environment the
+# first time it runs.
+EXTRACT_FLOOR_S = 1800
+EXTRACT_S_PER_CELL = 2
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the step's arguments."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--scale-test-base", required=True, help="storage-scale-test checkout (for its extractor)")
     parser.add_argument("--run", default="{}", help="The run_storage_test step's JSON output")
-    parser.add_argument("--min-mbps", type=float, default=0.0, help="Bandwidth floor in MB/s (0 = report only)")
-    parser.add_argument("--min-iops", type=float, default=0.0, help="IOPS floor (0 = report only)")
-    parser.add_argument("--command-timeout", type=int, default=600, help="Seconds for the report extractor")
-    return parser.parse_args()
+    parser.add_argument(
+        "--min-mbps", type=_floor, default=0.0, help="Bandwidth floor in MB/s (0 or empty = report only)"
+    )
+    parser.add_argument("--min-iops", type=_floor, default=0.0, help="IOPS floor (0 or empty = report only)")
+    parser.add_argument(
+        "--command-timeout",
+        type=int,
+        default=0,
+        help=f"Seconds for the report extractor (0 = {EXTRACT_S_PER_CELL} per cell, at least {EXTRACT_FLOOR_S})",
+    )
+    return parser.parse_args(argv)
+
+
+def _floor(value: str) -> float:
+    """A floor argument: a finite number, or empty for none (0)."""
+    if not value.strip():
+        return 0.0
+    try:
+        floor = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from None
+    if not math.isfinite(floor):
+        raise argparse.ArgumentTypeError(f"{value!r} is not a finite number")
+    return floor
+
+
+def extract_timeout(command_timeout: int, run: dict[str, Any]) -> int:
+    """The extractor's time limit: *command_timeout* when set, else sized from the sweep's cells."""
+    if command_timeout > 0:
+        return command_timeout
+    total = (run.get("executions") or {}).get("total")
+    cells = total if isinstance(total, int) else 0
+    return max(EXTRACT_FLOOR_S, EXTRACT_S_PER_CELL * cells)
 
 
 def _demo_result(min_mbps: float, min_iops: float) -> dict[str, Any]:
@@ -98,11 +133,12 @@ def _demo_result(min_mbps: float, min_iops: float) -> dict[str, Any]:
 
 
 def _number(value: Any) -> float:
-    """A document number as a float; null or malformed reads as 0."""
+    """A document number as a float; null, malformed or non-finite (inf, NaN) reads as 0."""
     try:
-        return float(value or 0)
+        number = float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+    return number if math.isfinite(number) else 0.0
 
 
 def _load_results(base: Path, results_dir: str, timeout: int) -> tuple[dict[str, Any] | None, str | None]:
@@ -114,9 +150,13 @@ def _load_results(base: Path, results_dir: str, timeout: int) -> tuple[dict[str,
     """
     document = Path(results_dir) / RESULTS_JSON
     document.unlink(missing_ok=True)
-    proc = sst.run([str(base / sst.EXTRACTOR), results_dir, "--to-json"], timeout)
+    command = [str(base / sst.EXTRACTOR), results_dir, "--to-json"]
+    proc = sst.run(command, timeout)
     if "unrecognized arguments: --to-json" in proc.stderr:
         return None, "this storage-scale-test has no --to-json; v2.1.0 or later is required"
+    if proc.timed_out:
+        # The results are all on disk, so the report does not need the cluster or this run.
+        return None, f"extractor timed out after {timeout}s; rerun it offline: {' '.join(command)}"
     if proc.returncode != 0:
         sst.log(f"extractor exited {proc.returncode}: {proc.stderr.strip()[-500:]}")
     if not document.is_file():
@@ -134,7 +174,12 @@ def _load_results(base: Path, results_dir: str, timeout: int) -> tuple[dict[str,
 
 def _io_executions(document: dict[str, Any] | None) -> list[dict[str, Any]]:
     """The document's IO executions (the sweep runs no metadata cells)."""
-    return [e for e in (document or {}).get("executions") or [] if e.get("kind") == "io"]
+    return [e for e in _executions(document) if e.get("kind") == "io"]
+
+
+def _executions(document: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The document's executions, skipping any entry that is not an object."""
+    return [e for e in (document or {}).get("executions") or [] if isinstance(e, dict)]
 
 
 def _headline(document: dict[str, Any] | None) -> dict[str, Any]:
@@ -162,10 +207,10 @@ def _incomplete_results(document: dict[str, Any] | None) -> list[str]:
     results did not parse completely, with storage-scale-test's problem codes.
     """
     found = []
-    for execution in (document or {}).get("executions") or []:
+    for execution in _executions(document):
         ledger, results = execution.get("ledger_state"), execution.get("result_state")
         if ledger != "success" or results != "complete":
-            codes = ", ".join(sorted({p.get("code", "?") for p in execution.get("problems") or []}))
+            codes = ", ".join(sorted({str(p.get("code") or "?") for p in execution.get("problems") or []}))
             found.append(
                 f"{execution.get('execution_id') or execution.get('coordinate_key')}: "
                 f"ledger {ledger}, results {results}" + (f" ({codes})" if codes else "")
@@ -210,8 +255,9 @@ def evaluate(
     report_error: str | None = None,
 ) -> dict[str, Any]:
     """Build the evaluation result from the run step's output and the results document."""
-    executions = run.get("executions") or {}
-    complete = run.get("state") == "SUCCESS" and executions.get("failed") == 0 and executions.get("total", 0) > 0
+    executions = run.get("executions") if isinstance(run.get("executions"), dict) else {}
+    total = executions.get("total")
+    complete = run.get("state") == "SUCCESS" and executions.get("failed") == 0 and isinstance(total, int) and total > 0
     numbers = _headline(document)
     incomplete = _incomplete_results(document)
     present = (
@@ -245,19 +291,29 @@ def evaluate(
     return result
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Evaluate the sweep and print the step result."""
-    args = _parse_args()
+    args = _parse_args(argv)
     if sst.DEMO_MODE:
         return sst.emit(_demo_result(args.min_mbps, args.min_iops))
+    failure = {"success": False, "platform": "storage", "test_name": "evaluate_storage_test"}
     try:
         run = json.loads(args.run or "{}")
     except ValueError as exc:
-        error = f"--run is not JSON: {exc}"
-        return sst.emit({"success": False, "platform": "storage", "test_name": "evaluate_storage_test", "error": error})
+        return sst.emit({**failure, "error": f"--run is not JSON: {exc}"})
+    if not isinstance(run, dict):
+        return sst.emit({**failure, "error": f"--run is not a JSON object: {args.run}"})
     document, report_error = None, "the run step reported no results_dir"
     if run.get("results_dir"):
-        document, report_error = _load_results(Path(args.scale_test_base), run["results_dir"], args.command_timeout)
+        timeout = extract_timeout(args.command_timeout, run)
+        restore = sst.install_interrupt_handler()
+        try:
+            document, report_error = _load_results(Path(args.scale_test_base), str(run["results_dir"]), timeout)
+        except OSError as exc:
+            # An extractor that cannot run (ToolError names it and the likely cause), or an unwritable directory.
+            document, report_error = None, str(exc)
+        finally:
+            restore()
     return sst.emit(evaluate(run, document, args.min_mbps, args.min_iops, report_error))
 
 

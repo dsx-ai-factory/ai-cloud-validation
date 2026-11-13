@@ -24,13 +24,19 @@ lifecycle synchronously, so one isvctl step can submit, wait and collect.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import shlex
+import signal
+import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -62,38 +68,159 @@ CURRENT_ATTEMPT = Path("kubernetes") / "current-attempt"
 # one is refused with this message; storage-scale-test's answer is to wait and retry.
 LOCK_BUSY = "another Kubernetes lifecycle operation is active"
 LOCK_RETRY_INTERVAL_S = 5
-LOCK_RETRIES = 6
+# How long a refused command keeps retrying. Cancel, collect and the status that confirms
+# them wait out the longest a killed call's leftover kubectl can hold the lock, or a command
+# someone runs by hand; the wait loop's polls give up sooner, and poll again later.
+LOCK_WINDOW_S = 130
+POLL_LOCK_WINDOW_S = 30
+
+# A timed-out call's process group gets TERM_GRACE_S to exit before it is killed, then
+# DRAIN_S to hand over its output: storage-scale-test runs kubectl under `timeout`, which
+# starts its own process group, so a leftover kubectl can hold the pipes open.
+TERM_GRACE_S = 5
+DRAIN_S = 2
+# On Ctrl-C isvctl kills the step 2 s after forwarding the signal; stop the call well before.
+INTERRUPT_GRACE_S = 0.5
+
+# One budget (--collect-timeout) covers every --collect attempt, its lock retries and its
+# confirming --status. Each --collect hands storage-scale-test what is left, less one status
+# check and COLLECT_RESERVE_S for the parts its own deadline does not cover (helper Pod start,
+# Job quiescence, bounded kubectl calls, the import), as KUBECTL_COLLECTION_TIMEOUT_SECONDS;
+# storage-scale-test rejects a value below MIN_UPSTREAM_COLLECT_S.
+COLLECT_RESERVE_S = 900
+MIN_UPSTREAM_COLLECT_S = 60
+COLLECT_DEADLINE_ENV = "KUBECTL_COLLECTION_TIMEOUT_SECONDS"
+
+# storage-scale-test's failure reasons (STORAGE_SCALE_TEST_DIAGNOSTIC_REASON), by what a failed
+# --status says about the sweep. Every lifecycle command first checks the cluster's identity,
+# so a lost or refused connection reports an access reason; such a failure says nothing about
+# the sweep, which runs on in-cluster.
+REASONS_ACCESS = frozenset({"AUTH", "TIMEOUT", "API_THROTTLED", "API_UNAVAILABLE"})
+# The cluster answered, but a helper (the Pod that reads the sweep's ledger) did not get far.
+# classify() treats any reason outside the other sets as transient, so this set documents the
+# known ones (the vocabulary test checks it) rather than deciding anything.
+REASONS_TRANSIENT = frozenset(
+    {"POD_UNSCHEDULABLE", "IMAGE_PULL", "PVC_MOUNT", "PVC_IO", "TRANSFER_FAILED", "INSUFFICIENT_CAPACITY", "ENOSPC"}
+)
+# Asking again gives the same answer.
+REASONS_DETERMINISTIC = frozenset(
+    {
+        "LEDGER_INCONSISTENT",
+        "OWNERSHIP_AMBIGUOUS",
+        "LOCAL_IO",
+        "PATH_REJECTED",
+        "INVALID_LIFECYCLE_OPERATION",
+        "ARCHIVE_INVALID",
+    }
+)
+# Transient on a status or collector helper Pod, which each command recreates; deterministic on
+# what the sweep owns (its Namespace, claim, volume, Lease, Job or DaemonSet).
+IDENTITY_MISMATCH = "IDENTITY_MISMATCH"
+CANCELLATION_INCOMPLETE = "CANCELLATION_INCOMPLETE"
+HELPER_POD = re.compile(r"-(status|collector)-[0-9a-f]{8}$")
+
+# The wait. With --wait-timeout auto, a sweep of N cells of D s phases gets
+# SAFETY x (FIXED_OVERHEAD_S + N x (2D + PER_CELL_OVERHEAD_S)), at least WAIT_FLOOR_S, at most
+# --wait-cap; the estimate grows if cells take longer than that. FIXED_OVERHEAD_S covers
+# submit, noticing the end and one status check; PER_CELL_OVERHEAD_S is measured below 2 s.
+FIXED_OVERHEAD_S = 150
+PER_CELL_OVERHEAD_S = 5
+SAFETY = 2.0
+WAIT_FLOOR_S = 900
+# A sweep that makes no progress for max(STALL_FLOOR_S, 3 cells' time) is stuck.
+STALL_FLOOR_S = 1800
+# Status checks that fail without a reason since the last good one before the run gives up.
+UNKNOWN_LIMIT = 5
+
+# Collection limits. storage-scale-test collects at most 2 GiB and 50,000 files per sweep; its
+# per-interval live CSVs are what grows with phase length, about BYTES_PER_ROW per row
+# (measured 70-93 B), and each cell adds 8 files to 6 fixed ones.
+BYTES_PER_ROW = 100
+WARN_BYTES = 1 << 30
+REFUSE_BYTES = int(1.8 * (1 << 30))
+MAX_CELLS = 5624
+# The longest any time setting may be: 30 days. Longer values are mistakes, and a huge one would
+# overflow the clock arithmetic part-way through a wait.
+MAX_SECONDS = 30 * 24 * 3600
+
+# Run isolation. Each run step and teardown step holds STATE_LOCK beside the state file for its
+# whole life, so two of them never act on one record at once; the run step also holds
+# CHECKOUT_LOCK in the storage-scale-test checkout while it writes env.sh and submits, since
+# runs from other working directories share that file. INTERRUPTED, beside the state file,
+# records when a run step was interrupted.
+STATE_LOCK = ".lock"
+CHECKOUT_LOCK = ".isvctl.lock"
+INTERRUPTED = "interrupted"
+# Reading the kubeconfig's current context and server is local; kubectl answers in well under 1 s.
+IDENTITY_TIMEOUT_S = 30
 
 _KV = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 # Keys the steps act on. Like storage-scale-test's own reader, accept them only when they
 # appear exactly once; a repeated one is dropped, so the reply reads as unknown.
 UNIQUE_KEYS = ("STORAGE_SCALE_TEST_RESULTS_DIR", "STORAGE_SCALE_TEST_ATTEMPT_ID", "STATE", "NEXT_ACTION")
 
+# The only fields a run log line may carry. Values come from storage-scale-test's replies and
+# the steps' own counters; never raw output, the environment or the kubeconfig.
+RUN_LOG_KEYS = frozenset(
+    (
+        "cells initial_s deadline_s bytes members refusal warning"  # estimate
+        " rc seconds results_dir_name attempt"  # submit
+        " n kind state next_action done started total reason resource_kind status_s busy_retries"  # poll
+        " since_progress_s window_s outage_s grace_s unknown since_ok_s"  # poll: the wait's guards
+        " old_s new_s why"  # deadline, stop
+        " timed_out upstream_s result_collection"  # cancel, collect
+        " signal outcome"  # interrupt, release
+    ).split()
+)
+RUN_LOG_VALUE_MAX = 200
 
-class Budget:
-    """A step's time limits for its storage-scale-test calls.
 
-    Each call gets at most *command_timeout* seconds, and no call runs past the step's
-    overall budget (*total_s*; 0 = no overall limit). Set the budget below the step's own
-    timeout: a step that runs out of budget still reports what it did, while one that
-    isvctl kills at its timeout reports nothing.
-    """
+class Clock:
+    """The time source for waits and lock retries; tests swap in a fake that sleeps instantly."""
 
-    def __init__(self, command_timeout: int, total_s: int = 0) -> None:
-        self.command_timeout = command_timeout
-        self.deadline = time.monotonic() + total_s if total_s > 0 else None
+    def monotonic(self) -> float:
+        """Seconds on a clock that never goes back."""
+        return time.monotonic()
 
-    def remaining(self) -> float:
-        """Seconds left in the step's budget."""
-        return float("inf") if self.deadline is None else self.deadline - time.monotonic()
+    def sleep(self, seconds: float) -> None:
+        """Pause for *seconds*."""
+        time.sleep(seconds)
 
-    def call_timeout(self) -> int:
-        """The timeout for the next call: the command timeout, capped at the time left."""
-        return max(1, int(min(self.command_timeout, self.remaining())))
 
-    def spent(self) -> bool:
-        """True once the step's budget is used up."""
-        return self.remaining() <= 0
+CLOCK = Clock()
+
+
+class ToolError(OSError):
+    """A command that could not be started; its message names the file and the likely cause."""
+
+
+def launch_problem(path: str, exc: OSError) -> str:
+    """Why *path* could not be run, for a step's error."""
+    if isinstance(exc, PermissionError):
+        cause = "it is not executable (chmod +x it) or its directory cannot be read"
+    elif isinstance(exc, FileNotFoundError):
+        cause = "it (or the interpreter its first line names) does not exist"
+    else:
+        cause = exc.strerror or str(exc)
+    return f"cannot run {path}: {cause}"
+
+
+@dataclass(frozen=True)
+class Ran:
+    """A finished command: exit code, output, and whether our timeout stopped it."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+    # Times a lifecycle command was refused because another one held the lock.
+    busy_retries: int = 0
+
+
+# The storage-scale-test call in flight, for the interrupt handler.
+_ACTIVE: subprocess.Popen[str] | None = None
+# What the interrupt handler records before it exits (see on_interrupt).
+_ON_INTERRUPT: Callable[[], None] | None = None
 
 
 def log(message: str) -> None:
@@ -132,13 +259,194 @@ def parse_kv(text: str) -> dict[str, str]:
     return out
 
 
-def run(cmd: list[str], timeout: int, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    """Run a command; a timeout comes back as exit code 124 instead of raising."""
+def _signal_group(proc: subprocess.Popen[str], sig: signal.Signals) -> None:
+    """Signal the process group *proc* leads, if any of it is left."""
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env, check=False)
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        return subprocess.CompletedProcess(cmd, 124, stdout, f"timed out after {timeout}s")
+        # macOS refuses to signal a group whose only member is an exited, unreaped leader.
+        proc.poll()
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _stop(proc: subprocess.Popen[str]) -> tuple[str, str]:
+    """Stop a timed-out command's process group and return what it printed.
+
+    Bounded at TERM_GRACE_S + DRAIN_S: a leftover outside the group that still holds the
+    pipes gets them closed under it instead of being waited for.
+    """
+    _signal_group(proc, signal.SIGTERM)
+    try:
+        stdout, stderr = proc.communicate(timeout=TERM_GRACE_S)
+    except subprocess.TimeoutExpired:
+        _signal_group(proc, signal.SIGKILL)
+        try:
+            return proc.communicate(timeout=DRAIN_S)
+        except subprocess.TimeoutExpired:
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+            proc.wait()
+            return "", ""
+    # The leader exited; make sure nothing else in its group outlives the call.
+    _signal_group(proc, signal.SIGKILL)
+    return stdout, stderr
+
+
+def run(cmd: list[str], timeout: float, env: dict[str, str] | None = None) -> Ran:
+    """Run a command in its own session; a timeout comes back as exit code 124 instead of raising.
+
+    A command that cannot be started raises ToolError (an OSError) naming it and the likely cause.
+
+    On timeout the command's whole process group is stopped (TERM, then KILL), so no
+    storage-scale-test process outlives the call. It returns within timeout + TERM_GRACE_S +
+    DRAIN_S even when a leftover outside the group keeps the pipes open.
+    """
+    global _ACTIVE
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, start_new_session=True
+        )
+    except OSError as exc:
+        raise ToolError(launch_problem(cmd[0], exc)) from exc
+    _ACTIVE = proc
+    try:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = _stop(proc)
+            return Ran(124, stdout, f"{stderr}\ntimed out after {timeout:.0f}s", True)
+        except KeyboardInterrupt:
+            # The new session does not see the terminal's Ctrl-C; take the command down too.
+            _signal_group(proc, signal.SIGKILL)
+            proc.wait()
+            raise
+        return Ran(proc.returncode, stdout, stderr)
+    finally:
+        _ACTIVE = None
+
+
+def install_interrupt_handler(run_log: RunLog | None = None) -> Callable[[], None]:
+    """On SIGINT or SIGTERM, stop the call in flight and exit 130; returns the restore function.
+
+    isvctl forwards Ctrl-C to the step and kills it 2 s later. Each storage-scale-test call
+    runs in its own session and never sees that signal, so without this it would outlive the
+    step and hold the results directory's lock. The sweep itself is left alone: no cancel and
+    no state file change, so `--phase teardown` can release it afterwards (the run step records
+    the interruption in a file of its own, through on_interrupt). SIGTERM exits 130 too, so
+    both read as an interrupted step.
+    """
+
+    def handle(signum: int, _frame: Any) -> None:
+        # Exit whatever happens here: the signal can land inside a stderr write, where print()
+        # would raise instead of writing.
+        try:
+            proc = _ACTIVE
+            if proc is not None:
+                _signal_group(proc, signal.SIGTERM)
+                deadline = time.monotonic() + INTERRUPT_GRACE_S
+                while proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                _signal_group(proc, signal.SIGKILL)
+            if _ON_INTERRUPT is not None:
+                try:
+                    _ON_INTERRUPT()
+                except Exception:  # still report the interruption
+                    pass
+            name = signal.Signals(signum).name
+            if run_log is not None:
+                run_log.event("interrupt", signal=name)
+            message = f"interrupted ({name}); run the same command with --phase teardown to release the sweep\n"
+            try:
+                os.write(2, message.encode())
+            except OSError:
+                pass
+        finally:
+            os._exit(130)
+
+    previous = {sig: signal.signal(sig, handle) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+    def restore() -> None:
+        on_interrupt(None)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+    return restore
+
+
+def on_interrupt(record: Callable[[], None] | None) -> None:
+    """Have the interrupt handler call *record* before it exits (None: nothing)."""
+    global _ON_INTERRUPT
+    _ON_INTERRUPT = record
+
+
+class RunLog:
+    """A run's progress log: one line per status check, cancel and collect.
+
+    isvctl prints nothing from a step that passes, so this file is the only record of how a
+    long sweep is going. Lines are ``<UTC>  +<elapsed s>  <event>  key=value ...``; only
+    RUN_LOG_KEYS are written, each value with its whitespace replaced by ``_`` and cut to
+    RUN_LOG_VALUE_MAX characters.
+    """
+
+    def __init__(self, path: Path, fd: int) -> None:
+        self.path = path
+        self._fd = fd
+        self._started = CLOCK.monotonic()
+
+    @classmethod
+    def create(cls, directory: Path) -> RunLog:
+        """A new log in *directory*, named for the UTC start time and this process."""
+        directory.mkdir(parents=True, exist_ok=True)
+        stem = f"run-{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{os.getpid()}"
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_APPEND
+        for suffix in ["", *(f"-{n}" for n in range(1, 10))]:
+            path = directory / f"{stem}{suffix}.log"
+            try:
+                return cls(path, os.open(path, flags, 0o644))
+            except FileExistsError:
+                continue
+        raise FileExistsError(f"{directory} already holds {stem}.log through {stem}-9.log")
+
+    @classmethod
+    def reopen(cls, path: str | None) -> RunLog | None:
+        """An earlier run's log, to append to; None when there is none.
+
+        Elapsed times go on from the run's start (its first line), not from the reopen.
+        """
+        if not path:
+            return None
+        try:
+            run_log = cls(Path(path), os.open(path, os.O_WRONLY | os.O_APPEND))
+        except OSError:
+            return None
+        try:
+            with open(path, encoding="utf-8") as lines:
+                first = datetime.strptime(lines.readline()[:20], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+            run_log._started -= max(0.0, (datetime.now(UTC) - first).total_seconds())
+        except (OSError, ValueError):
+            pass
+        return run_log
+
+    def event(self, name: str, **fields: Any) -> None:
+        """Append one line; fields outside RUN_LOG_KEYS and empty values are dropped."""
+        values = [
+            f"{key}={'_'.join(str(value).split())[:RUN_LOG_VALUE_MAX]}"
+            for key, value in fields.items()
+            if key in RUN_LOG_KEYS and value is not None and value != ""
+        ]
+        stamp = f"{datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ}  +{CLOCK.monotonic() - self._started:.0f}"
+        try:
+            os.write(self._fd, f"{stamp}  {name}  {' '.join(values)}".rstrip().encode() + b"\n")
+        except OSError as exc:
+            log(f"cannot write the run log {self.path}: {exc}")
+
+    def close(self) -> None:
+        """Close the log."""
+        try:
+            os.close(self._fd)
+        except OSError:
+            pass
 
 
 def describe_failure(stderr: str) -> str:
@@ -193,88 +501,583 @@ def has_attempt(results_dir: str) -> bool:
 
 
 def lifecycle(
-    base: Path, operation: str, results_dir: str, budget: Budget, env: dict[str, str]
-) -> subprocess.CompletedProcess[str]:
-    """Run ``--status``, ``--cancel`` or ``--collect``, retrying while another command holds the lock."""
-    for attempt in range(LOCK_RETRIES + 1):
-        proc = run([*launcher(base), operation, results_dir], budget.call_timeout(), env)
-        if LOCK_BUSY not in proc.stderr or attempt == LOCK_RETRIES or budget.spent():
-            return proc
-        log(f"{operation}: another lifecycle command holds the lock; retrying")
-        time.sleep(min(LOCK_RETRY_INTERVAL_S, max(0.0, budget.remaining())))
-    return proc
+    base: Path,
+    operation: str,
+    results_dir: str,
+    env: dict[str, str] | Callable[[], dict[str, str]],
+    *,
+    timeout_s: Callable[[], float],
+    lock_window_s: float,
+) -> Ran:
+    """Run ``--status``, ``--cancel`` or ``--collect``, retrying while another command holds the lock.
 
-
-def query(base: Path, results_dir: str, budget: Budget, env: dict[str, str]) -> tuple[int, dict[str, str]]:
-    """Ask storage-scale-test for the sweep's state.
-
-    Returns the exit code and the parsed keys. A failed query (lost API access, an expired
-    credential) is not evidence that the sweep failed: it keeps running in-cluster, so
-    callers treat it as "unknown" and ask again.
+    *timeout_s* and *env* (a dict, or a function returning one) are evaluated before every
+    invocation, lock retries included, so a caller with one budget for several calls hands
+    each the time it has left. A refused command is retried every LOCK_RETRY_INTERVAL_S
+    until *lock_window_s* has passed.
     """
-    proc = lifecycle(base, "--status", results_dir, budget, env)
-    fields = parse_kv(proc.stdout)
-    reason = parse_kv(proc.stderr).get("STORAGE_SCALE_TEST_DIAGNOSTIC_REASON")
+    started = CLOCK.monotonic()
+    retries = 0
+    while True:
+        ran = run([*launcher(base), operation, results_dir], timeout_s(), env() if callable(env) else env)
+        if LOCK_BUSY not in ran.stderr or CLOCK.monotonic() - started >= lock_window_s:
+            return replace(ran, busy_retries=retries)
+        log(f"{operation}: another lifecycle command holds the lock; retrying")
+        CLOCK.sleep(LOCK_RETRY_INTERVAL_S)
+        retries += 1
+
+
+def _kind(ran: Ran, fields: dict[str, str], reason: str, resource_name: str) -> str:
+    """The class of one ``--status`` reply; see classify()."""
+    next_action = fields.get("NEXT_ACTION")
+    if ran.returncode == 0 and next_action:
+        return "ok"
+    # An incomplete cancel is a known state, which --status reports with exit 1. Another reason
+    # with the same shape (LEDGER_INCONSISTENT) is not.
+    if (
+        ran.returncode == 1
+        and fields.get("STATE") == CANCEL_REQUESTED
+        and next_action
+        and reason in ("", CANCELLATION_INCOMPLETE)
+    ):
+        return "ok"
+    if ran.returncode == 0:
+        return "transient"
+    if LOCK_BUSY in ran.stderr:
+        return "busy"
+    if ran.timed_out:
+        return "slow"
+    if reason in REASONS_ACCESS:
+        return "access"
+    if reason in REASONS_DETERMINISTIC:
+        return "deterministic"
+    if reason == IDENTITY_MISMATCH:
+        return "transient" if HELPER_POD.search(resource_name) else "deterministic"
+    if reason:
+        # REASONS_TRANSIENT, CANCELLATION_INCOMPLETE without a state, or a reason this version
+        # does not know.
+        return "transient"
+    return "unknown"
+
+
+def classify(ran: Ran) -> tuple[str, dict[str, str]]:
+    """Classify a ``--status`` reply, and return it with the keys it printed.
+
+    - ``ok``: the sweep's state, with NEXT_ACTION.
+    - ``busy``: another lifecycle command held the lock throughout.
+    - ``slow``: our status timeout stopped it.
+    - ``access``: the cluster could not be reached or refused us (REASONS_ACCESS).
+    - ``transient``: the cluster answered but a helper failed, a reason this version does not
+      know, or exit 0 without NEXT_ACTION.
+    - ``unknown``: a failure with no reason. The identity check that starts every command
+      reports a reason when the cluster is out of reach, so the cluster answered.
+    - ``deterministic``: asking again gives the same answer (REASONS_DETERMINISTIC, or a
+      mismatch on what the sweep owns).
+    """
+    fields = parse_kv(ran.stdout)
+    diagnostic = {k.removeprefix("STORAGE_SCALE_TEST_DIAGNOSTIC_"): v for k, v in parse_kv(ran.stderr).items()}
+    reason = diagnostic.get("REASON", "")
     if reason:
         fields["DIAGNOSTIC_REASON"] = reason
-    if proc.returncode != 0 and fields.get("STATE") == CANCEL_REQUESTED and fields.get("NEXT_ACTION"):
-        # An incomplete cancel is a known state, which --status reports with exit 1.
-        return 0, fields
-    if proc.returncode != 0:
-        log(f"--status exited {proc.returncode}: {proc.stderr.strip()[-500:]}")
-    return proc.returncode, fields
+    if diagnostic.get("RESOURCE_KIND"):
+        fields["DIAGNOSTIC_RESOURCE_KIND"] = diagnostic["RESOURCE_KIND"]
+    if ran.timed_out:
+        fields["TIMED_OUT"] = "1"
+    if ran.busy_retries:
+        fields["BUSY_RETRIES"] = str(ran.busy_retries)
+    kind = _kind(ran, fields, reason, diagnostic.get("RESOURCE_NAME", ""))
+    if kind != "ok" and ran.returncode != 0:
+        fields["DIAGNOSTIC_MESSAGE"] = describe_failure(ran.stderr)
+    return kind, fields
+
+
+def query(
+    base: Path,
+    results_dir: str,
+    env: dict[str, str],
+    *,
+    status_timeout: float | Callable[[], float],
+    lock_window_s: float = POLL_LOCK_WINDOW_S,
+) -> tuple[str, dict[str, str]]:
+    """Ask storage-scale-test for the sweep's state; returns classify()'s ``(kind, fields)``.
+
+    Only ``ok`` describes the sweep. A failed query (lost API access, an expired credential)
+    is not evidence that the sweep failed: it keeps running in-cluster. *status_timeout* may be
+    a function, evaluated before every invocation as in lifecycle().
+    """
+    timeout_s = status_timeout if callable(status_timeout) else lambda: status_timeout
+    ran = lifecycle(base, "--status", results_dir, env, timeout_s=timeout_s, lock_window_s=lock_window_s)
+    kind, fields = classify(ran)
+    if kind != "ok":
+        log(f"--status: {kind}, exit {ran.returncode}: {ran.stderr.strip()[-500:]}")
+    return kind, fields
+
+
+def _count(fields: dict[str, str], *keys: str) -> int | None:
+    """The sum of the named EXECUTIONS_* counts, or None when any is missing."""
+    values = [fields.get(f"EXECUTIONS_{key}", "") for key in keys]
+    return sum(int(v) for v in values) if all(v.isdigit() for v in values) else None
+
+
+def _started(fields: dict[str, str]) -> int | None:
+    """Cells started so far (total less pending), or None when either count is missing."""
+    total, pending = _count(fields, "TOTAL"), _count(fields, "PENDING")
+    return total - pending if total is not None and pending is not None else None
+
+
+def parse_node_spec(spec: str) -> list[int] | None:
+    """The node counts of a ``--nodes`` spec (``X``, ``X-Y``, ``X-Y+Z``, comma lists), or None.
+
+    Like storage-scale-test, a range always includes its start and its end: ``1-10+4`` is
+    1, 5, 9, 10.
+    """
+    counts: list[int] = []
+    for element in spec.split(","):
+        match = re.fullmatch(r"(\d+)(?:-(\d+)(?:\+(\d+))?)?", element.strip())
+        if not match:
+            return None
+        start = int(match.group(1))
+        stop = int(match.group(2) or start)
+        step = int(match.group(3) or 1)
+        if start < 1 or stop < start or step < 1:
+            return None
+        counts += [*range(start, stop, step), stop]
+    return counts
+
+
+def count_node_counts(spec: str) -> int | None:
+    """How many node counts parse_node_spec(*spec*) gives, without listing them; None for an unknown spec."""
+    total = 0
+    for element in spec.split(","):
+        match = re.fullmatch(r"(\d+)(?:-(\d+)(?:\+(\d+))?)?", element.strip())
+        if not match:
+            return None
+        start = int(match.group(1))
+        stop = int(match.group(2) or start)
+        step = int(match.group(3) or 1)
+        if start < 1 or stop < start or step < 1:
+            return None
+        total += len(range(start, stop, step)) + 1
+    return total
+
+
+def count_cells(nodes: str, io_sizes: list[str], threads: list[str], iodepths: list[str]) -> int | None:
+    """The sweep's cells (node counts x IO sizes x threads x IO depths), or None for an unknown spec."""
+    node_counts = count_node_counts(nodes)
+    if node_counts is None:
+        return None
+    return node_counts * len(io_sizes) * len(threads) * len(iodepths)
+
+
+def initial_estimate(cells: int, duration_s: int) -> int:
+    """Seconds from submit until the run notices a sweep of *cells* cells has finished."""
+    return FIXED_OVERHEAD_S + cells * (2 * duration_s + PER_CELL_OVERHEAD_S)
+
+
+def auto_deadline_s(
+    initial_s: float | None, cap_s: float, elapsed_s: float = 0, done: int = 0, total: int = 0
+) -> float:
+    """The automatic wait, from submit: SAFETY x the larger of the estimate and the projection
+    from the cells done so far, at least WAIT_FLOOR_S, at most *cap_s*.
+    """
+    candidates = [WAIT_FLOOR_S, (initial_s or 0) * SAFETY]
+    if done > 0 and total > 0:
+        candidates.append(elapsed_s * total / done * SAFETY)
+    return min(cap_s, max(candidates))
+
+
+def stall_window_s(duration_s: int, elapsed_s: float = 0, done: int = 0) -> float:
+    """How long a sweep may go without progress: three cells' time, at least STALL_FLOOR_S.
+
+    A cell's time is its two phases plus overhead, or the average so far if that is longer.
+    """
+    per_cell = max(2 * duration_s + PER_CELL_OVERHEAD_S, elapsed_s / done if done else 0)
+    return max(STALL_FLOOR_S, 3 * per_cell)
+
+
+def estimate_collection(
+    node_counts: list[int],
+    io_sizes: list[str],
+    threads: list[str],
+    iodepths: list[str],
+    duration_s: int,
+    live_interval_ms: int,
+    extended: bool,
+) -> tuple[int, int]:
+    """Estimate what collect copies back: (bytes of live CSV, number of files).
+
+    With extended live CSVs, each live interval of each phase writes a total row plus one row
+    per thread for a one-node cell, or one per node otherwise.
+    """
+    rows = 0
+    if extended:
+        rows = sum(
+            1 + (int(t) if nodes == 1 else nodes)
+            for nodes in node_counts
+            for t in threads
+            for _ in io_sizes
+            for _ in iodepths
+        )
+    intervals = 2 * duration_s * 1000 / live_interval_ms
+    cells = len(node_counts) * len(io_sizes) * len(threads) * len(iodepths)
+    return int(intervals * rows * BYTES_PER_ROW), 8 * cells + 6
+
+
+@dataclass
+class Guards:
+    """What ends a wait besides the sweep finishing, judged after every status check.
+
+    Precedence, first match wins: finished (``terminal``); a deterministic failure;
+    UNKNOWN_LIMIT reason-less failures since the last good check (``unknown_limit``); the
+    cluster out of reach for *grace* (``outage``); no good check for max(grace, window)
+    (``watchdog``); a good check with no progress for *window* (``stalled``); the deadline.
+    Progress (more cells done or started) is read only from good checks, so an outage is never
+    taken for a stall.
+    """
+
+    last_ok: float
+    last_progress: float
+    window: float
+    grace: float
+    deadline: float | None = None
+    max_done: int = 0
+    max_started: int = 0
+    unknown: int = 0
+    outage_since: float | None = None
+    slow_streak: int = 0
+
+    def observe(self, kind: str, fields: dict[str, str], now: float) -> str | None:
+        """Record one status check; return why the wait ends, or None to keep waiting."""
+        if kind == "ok":
+            self.last_ok = now
+            self.unknown, self.outage_since, self.slow_streak = 0, None, 0
+            done, started = _count(fields, "SUCCEEDED", "FAILED"), _started(fields)
+            if (done is not None and done > self.max_done) or (started is not None and started > self.max_started):
+                self.last_progress = now
+                self.max_done = max(self.max_done, done or 0)
+                self.max_started = max(self.max_started, started or 0)
+            if fields.get("NEXT_ACTION") != NEXT_WAIT:
+                return "terminal"
+        else:
+            self.slow_streak = self.slow_streak + 1 if kind == "slow" else 0
+            if kind == "deterministic":
+                return "deterministic"
+            if kind == "unknown":
+                self.unknown += 1
+            if self.outage_since is None and (kind in ("access", "transient") or self.slow_streak >= 2):
+                self.outage_since = now
+        if self.unknown >= UNKNOWN_LIMIT:
+            return "unknown_limit"
+        if self.outage_since is not None and now - self.outage_since >= self.grace:
+            return "outage"
+        if now - self.last_ok >= max(self.grace, self.window):
+            return "watchdog"
+        if kind == "ok" and now - self.last_progress >= self.window:
+            return "stalled"
+        if self.deadline is not None and now >= self.deadline:
+            return "deadline"
+        return None
+
+
+@dataclass(frozen=True)
+class WaitPlan:
+    """How the run waits for its sweep.
+
+    *wait_s* is a fixed wait, or None with *auto* (sized from the sweep) or without it (no
+    deadline). *stall_s* None sizes the stall window from the phase duration. *cells* is
+    None when the node spec could not be read; the first good status check supplies it.
+    """
+
+    auto: bool
+    wait_s: float | None
+    cap_s: float
+    stall_s: float | None
+    grace_s: float
+    duration_s: int
+    cells: int | None
+    interval_s: float
+    status_timeout: float
+
+
+@dataclass(frozen=True)
+class WaitOutcome:
+    """How a wait ended.
+
+    *verdict* is ``terminal`` (collect as normal), ``deadline``, ``stalled``,
+    ``status_failed`` (cancel and collect) or ``unreachable`` (leave it to teardown). *status*
+    is the last good status; *why* the guard that fired. *probed* is True when an extra status
+    check decided it after the cluster was out of reach, so one cancel and one collect follow.
+    *deadline_s* is the wait's deadline from submit when it had one, and *since_progress_s* the
+    time since the last progress when the wait ended.
+    """
+
+    verdict: str
+    status: dict[str, str]
+    why: str
+    probed: bool = False
+    window_s: float = 0
+    estimate_s: float | None = None
+    deadline_s: float | None = None
+    since_progress_s: float = 0
+
+
+def _poll_fields(kind: str, fields: dict[str, str], guards: Guards, now: float) -> dict[str, Any]:
+    """The run log fields of one status check."""
+    return {
+        "kind": kind,
+        "state": fields.get("STATE"),
+        "next_action": fields.get("NEXT_ACTION"),
+        "done": _count(fields, "SUCCEEDED", "FAILED"),
+        "started": _started(fields),
+        "total": fields.get("EXECUTIONS_TOTAL"),
+        "reason": fields.get("DIAGNOSTIC_REASON"),
+        "resource_kind": fields.get("DIAGNOSTIC_RESOURCE_KIND"),
+        "busy_retries": fields.get("BUSY_RETRIES"),
+        "since_progress_s": round(now - guards.last_progress),
+        "window_s": round(guards.window),
+        "outage_s": round(now - guards.outage_since) if guards.outage_since is not None else None,
+        "grace_s": round(guards.grace),
+        "unknown": guards.unknown,
+        "since_ok_s": round(now - guards.last_ok),
+    }
+
+
+def end_of_outage(
+    base: Path,
+    results_dir: str,
+    env: dict[str, str],
+    *,
+    plan: WaitPlan,
+    guards: Guards,
+    last: dict[str, str],
+    why: str,
+    polls: int,
+    run_log: RunLog | None = None,
+) -> WaitOutcome:
+    """After the cluster was out of reach, decide with one more status check.
+
+    Finished: collect as normal. Readable but not finished, or the cluster answering with any
+    failure: one cancel and one collect. Still out of reach (``access``, ``slow``): no cancel
+    or collect, each of which would only use up its own timeout; teardown tries again.
+    """
+    asked = CLOCK.monotonic()
+    kind, fields = query(base, results_dir, env, status_timeout=plan.status_timeout)
+    now = CLOCK.monotonic()
+    if run_log is not None:
+        run_log.event("poll", n=polls, status_s=round(now - asked, 1), **_poll_fields(kind, fields, guards, now))
+    if kind == "ok" and fields.get("NEXT_ACTION") != NEXT_WAIT:
+        return WaitOutcome("terminal", fields, why, probed=True, window_s=guards.window)
+    if kind == "ok":
+        verdict = "deadline" if why == "deadline" else "status_failed"
+        return WaitOutcome(verdict, fields, why, probed=True, window_s=guards.window)
+    if kind in ("access", "slow"):
+        return WaitOutcome("unreachable", {**last, **_failure(fields)}, why, probed=True, window_s=guards.window)
+    return WaitOutcome("status_failed", {**last, **_failure(fields)}, why, probed=True, window_s=guards.window)
+
+
+def _failure(fields: dict[str, str]) -> dict[str, str]:
+    """The failure keys of a status reply, to report with the last good status."""
+    return {k: v for k, v in fields.items() if k.startswith("DIAGNOSTIC_")}
 
 
 def wait_for_terminal(
-    base: Path, results_dir: str, deadline_s: float, interval_s: int, budget: Budget, env: dict[str, str]
-) -> tuple[bool, dict[str, str]]:
-    """Poll ``--status`` until the sweep needs no more waiting, or the deadline passes.
+    base: Path,
+    results_dir: str,
+    env: dict[str, str],
+    *,
+    plan: WaitPlan,
+    run_log: RunLog | None = None,
+) -> WaitOutcome:
+    """Poll ``--status`` every *plan.interval_s* until the sweep needs no more waiting or a guard
+    ends the wait (Guards).
 
-    Returns ``(finished, last_known_status)``. Any NEXT_ACTION other than WAIT ends the wait:
-    COLLECT for a finished run, INSPECT for a failed submission or a pending cancel.
+    Any NEXT_ACTION other than WAIT ends the wait: COLLECT for a finished run, INSPECT for a
+    failed submission or a pending cancel. With ``auto``, the deadline grows as cells finish
+    if they take longer than estimated, and never shrinks.
     """
-    deadline = time.monotonic() + deadline_s
+    start = CLOCK.monotonic()
+    cells = plan.cells
+    initial = initial_estimate(cells, plan.duration_s) if cells is not None else None
+    if plan.auto:
+        deadline_s: float | None = auto_deadline_s(initial, plan.cap_s)
+    else:
+        deadline_s = plan.wait_s
+    guards = Guards(
+        last_ok=start,
+        last_progress=start,
+        window=plan.stall_s or stall_window_s(plan.duration_s),
+        grace=plan.grace_s,
+        deadline=start + deadline_s if deadline_s is not None else None,
+    )
     last: dict[str, str] = {}
+    polls = 0
     while True:
-        rc, fields = query(base, results_dir, budget, env)
-        if rc == 0 and fields.get("NEXT_ACTION"):
+        polls += 1
+        asked = CLOCK.monotonic()
+        kind, fields = query(base, results_dir, env, status_timeout=plan.status_timeout)
+        now = CLOCK.monotonic()
+        over_cap = False
+        if kind == "ok":
             last = fields
+            total = _count(fields, "TOTAL")
+            done = _count(fields, "SUCCEEDED", "FAILED")
+            recount = plan.auto and bool(total) and total != cells
+            if recount:
+                # The sweep's own count wins over the one read from the node spec.
+                unread = cells is None
+                cells, initial = total, initial_estimate(total or 0, plan.duration_s)
+                # A node spec it could not read is checked against the cap here instead of before submit.
+                over_cap = unread and initial > plan.cap_s
+            completed = bool(done) and (done or 0) > guards.max_done
+            if completed and plan.stall_s is None:
+                guards.window = max(guards.window, stall_window_s(plan.duration_s, now - start, done or 0))
+            if plan.auto and guards.deadline is not None and (recount or completed):
+                proposed = start + auto_deadline_s(initial, plan.cap_s, now - start, done or 0, total or 0)
+                if proposed > guards.deadline:
+                    if run_log is not None:
+                        run_log.event(
+                            "deadline",
+                            old_s=round(guards.deadline - start),
+                            new_s=round(proposed - start),
+                            why="cells" if done else "count",
+                        )
+                    guards.deadline = proposed
             log(
                 f"sweep {fields.get('STATE')}: {fields.get('EXECUTIONS_SUCCEEDED', '?')}"
-                f"/{fields.get('EXECUTIONS_TOTAL', '?')} done, next {fields['NEXT_ACTION']}"
+                f"/{fields.get('EXECUTIONS_TOTAL', '?')} done, next {fields.get('NEXT_ACTION')}"
             )
-            if fields["NEXT_ACTION"] != NEXT_WAIT:
-                return True, last
-        else:
-            log(f"sweep state unknown ({fields.get('DIAGNOSTIC_REASON', 'no status')}); it keeps running in-cluster")
-        if time.monotonic() + interval_s > deadline:
-            return False, last
-        time.sleep(interval_s)
+        # A sweep that already finished is collected, cap or not.
+        why = "cap" if over_cap and fields.get("NEXT_ACTION") == NEXT_WAIT else guards.observe(kind, fields, now)
+        if run_log is not None:
+            run_log.event(
+                "poll",
+                n=polls,
+                status_s=round(now - asked, 1),
+                **_poll_fields(kind, fields, guards, now),
+                deadline_s=round(guards.deadline - start) if guards.deadline is not None else None,
+            )
+        if why is None:
+            CLOCK.sleep(plan.interval_s)
+            continue
+        if run_log is not None:
+            run_log.event("stop", why=why)
+        ended = {
+            "window_s": guards.window,
+            "deadline_s": guards.deadline - start if guards.deadline is not None else None,
+            "since_progress_s": now - guards.last_progress,
+        }
+        if why == "cap":
+            return WaitOutcome("deadline", fields, why, estimate_s=initial, **ended)
+        if why == "terminal":
+            return WaitOutcome("terminal", fields, why, **ended)
+        if why in ("deterministic", "unknown_limit"):
+            return WaitOutcome("status_failed", {**last, **_failure(fields)}, why, **ended)
+        if why == "stalled":
+            return WaitOutcome("stalled", fields, why, **ended)
+        if why == "deadline" and kind == "ok":
+            return WaitOutcome("deadline", fields, why, **ended)
+        outcome = end_of_outage(
+            base, results_dir, env, plan=plan, guards=guards, last=last, why=why, polls=polls + 1, run_log=run_log
+        )
+        return replace(outcome, deadline_s=ended["deadline_s"])
 
 
-def collect(base: Path, results_dir: str, budget: Budget, env: dict[str, str], attempts: int = 3) -> dict[str, Any]:
+class _BudgetSpent(Exception):
+    """What is left of collect's budget is below the deadline storage-scale-test accepts."""
+
+
+def collect(
+    base: Path,
+    results_dir: str,
+    env: dict[str, str],
+    *,
+    collect_timeout: float,
+    status_timeout: float,
+    attempts: int = 3,
+    run_log: RunLog | None = None,
+) -> dict[str, Any]:
     """Run ``--collect`` until the sweep's cluster resources are released.
 
     ``--collect`` exits nonzero for a FAILED or CANCELLED attempt even after publishing the
     cells that finished, so its exit code alone does not say whether collection worked;
     ``RESULT_COLLECTION=COMPLETE`` does. A collect can publish the results yet leave cleanup
     pending (``NEXT_ACTION=COLLECT``); storage-scale-test's answer is to collect again.
+
+    Every attempt, its lock retries and its confirming ``--status`` share *collect_timeout*: no
+    call starts once it is spent. ``final_status`` holds the last status that confirmed an
+    attempt, so callers need not ask again.
     """
+    started = CLOCK.monotonic()
+    sent: dict[str, int] = {}
+
+    def remaining() -> float:
+        return collect_timeout - (CLOCK.monotonic() - started)
+
+    def collect_env() -> dict[str, str]:
+        upstream = int(remaining() - status_timeout - COLLECT_RESERVE_S)
+        if upstream < MIN_UPSTREAM_COLLECT_S:
+            raise _BudgetSpent
+        sent["upstream"] = upstream
+        return {**env, COLLECT_DEADLINE_ENV: str(upstream)}
+
+    def confirm_timeout() -> float:
+        left = min(status_timeout, remaining())
+        if left < 1:
+            raise _BudgetSpent
+        return left
+
+    spent = f"collect budget exhausted (--collect-timeout {collect_timeout:.0f}s)"
     out: dict[str, Any] = {"resources_released": False}
+    # Whether the last attempt's outcome is unknown, rather than known to leave resources held.
+    unconfirmed = False
     for attempt in range(1, attempts + 1):
-        if budget.spent():
-            out["collect_error"] = "the step's time budget ran out before collect finished"
+        began = CLOCK.monotonic()
+        try:
+            ran = lifecycle(
+                base,
+                "--collect",
+                results_dir,
+                collect_env,
+                timeout_s=lambda: remaining() - status_timeout,
+                lock_window_s=LOCK_WINDOW_S,
+            )
+        except _BudgetSpent:
+            out["collect_error"] = spent
             break
-        proc = lifecycle(base, "--collect", results_dir, budget, env)
-        out["collect_exit_code"] = proc.returncode
-        failed = parse_kv(proc.stdout)
+        out["collect_exit_code"] = ran.returncode
+        failed = parse_kv(ran.stdout)
         for key in ("FAILED_EXECUTION", "FAILED_LOG"):
             if failed.get(key):
                 out[key.lower()] = failed[key]
-        rc, status = query(base, results_dir, budget, env)
-        if rc != 0:
-            out["collect_error"] = "could not confirm the sweep's resources were released"
+        try:
+            kind, status = query(
+                base,
+                results_dir,
+                env,
+                status_timeout=confirm_timeout,
+                lock_window_s=min(LOCK_WINDOW_S, max(0.0, remaining())),
+            )
+        except _BudgetSpent:
+            kind, status = "", {}
+            out["collect_error"] = spent
+        if run_log is not None:
+            run_log.event(
+                "collect",
+                attempt=attempt,
+                rc=ran.returncode,
+                timed_out=ran.timed_out,
+                upstream_s=sent.get("upstream"),
+                seconds=round(CLOCK.monotonic() - began, 1),
+                result_collection=status.get("RESULT_COLLECTION"),
+            )
+        unconfirmed = kind != "ok"
+        if unconfirmed:
+            out.setdefault("collect_error", "its status could not be read")
+            if out["collect_error"] == spent:
+                break
             continue
+        out.pop("collect_error", None)
+        out["final_status"] = status
         out["result_collection"] = status.get("RESULT_COLLECTION")
         if status.get("RESULT_COLLECTION") == COLLECTION_COMPLETE:
             out["resources_released"] = True
@@ -284,27 +1087,65 @@ def collect(base: Path, results_dir: str, budget: Budget, env: dict[str, str], a
             break
         log(f"collect {attempt}: cleanup still pending (RESULT_COLLECTION={status.get('RESULT_COLLECTION')})")
     reason = out.get("collect_error") or f"RESULT_COLLECTION={out.get('result_collection')}"
-    out["collect_error"] = (
-        f"the sweep still holds cluster resources ({reason}); "
-        f"run `{base / LAUNCHER} --collect {results_dir}` to release them"
-    )
+    if unconfirmed:
+        out["collect_error"] = (
+            f"could not confirm that collect released the sweep's cluster resources ({reason}); "
+            f"run `{base / LAUNCHER} --status {results_dir}`, and `--collect` if it still holds them"
+        )
+    else:
+        out["collect_error"] = (
+            f"the sweep still holds cluster resources ({reason}); "
+            f"run `{base / LAUNCHER} --collect {results_dir}` to release them"
+        )
     return out
 
 
-def cancel(base: Path, results_dir: str, budget: Budget, env: dict[str, str], attempts: int = 3) -> bool:
+def cancel(
+    base: Path,
+    results_dir: str,
+    env: dict[str, str],
+    *,
+    command_timeout: float,
+    status_timeout: float,
+    attempts: int = 3,
+    run_log: RunLog | None = None,
+) -> bool:
     """Stop a running sweep; True once storage-scale-test reports it can be collected.
 
     Cancel is two-phase: it can leave the attempt in CANCEL_REQUESTED, and the documented
     response is to cancel again. Cancelling does not release anything; collect does.
     """
-    for _ in range(attempts):
-        if budget.spent():
-            return False
-        lifecycle(base, "--cancel", results_dir, budget, env)
-        rc, status = query(base, results_dir, budget, env)
-        if rc == 0 and status.get("STATE") != CANCEL_REQUESTED and status.get("NEXT_ACTION") != NEXT_WAIT:
+    for attempt in range(1, attempts + 1):
+        began = CLOCK.monotonic()
+        ran = lifecycle(
+            base, "--cancel", results_dir, env, timeout_s=lambda: command_timeout, lock_window_s=LOCK_WINDOW_S
+        )
+        kind, status = query(base, results_dir, env, status_timeout=status_timeout, lock_window_s=LOCK_WINDOW_S)
+        if run_log is not None:
+            run_log.event(
+                "cancel",
+                attempt=attempt,
+                rc=ran.returncode,
+                timed_out=ran.timed_out,
+                seconds=round(CLOCK.monotonic() - began, 1),
+                state=status.get("STATE"),
+            )
+        if kind == "ok" and status.get("STATE") != CANCEL_REQUESTED and status.get("NEXT_ACTION") != NEXT_WAIT:
             return True
     return False
+
+
+def cancel_failed(base: Path, results_dir: str, retry: str) -> str:
+    """Why a sweep whose cancel did not complete is still held, and how to release it.
+
+    Collect cannot release a sweep that has not stopped, so the remedy is cancel, then collect.
+    """
+    launcher = base / LAUNCHER
+    return (
+        f"cancel did not stop the sweep; it may still be running and holds the claim. Run "
+        f"`{launcher} --cancel {results_dir}` until it reports the sweep stopped, then "
+        f"`{launcher} --collect {results_dir}`; {retry}"
+    )
 
 
 def compose_env_sh(template: str, settings: list[str]) -> str:
@@ -348,11 +1189,26 @@ def bash_array(values: list[str]) -> str:
 
 
 def read_state(path: str) -> dict[str, Any] | None:
-    """Read the run's state file, or None when there is none."""
+    """Read the run's state file, or None when there is none (or it is not a JSON object)."""
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        state = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return state if isinstance(state, dict) else None
+
+
+def record_problem(record: dict[str, Any], need_base: bool = True) -> str | None:
+    """Why the steps cannot act on an uncollected record (hand-edited or foreign), or None.
+
+    Releasing a sweep also needs the checkout it was submitted from (*need_base*); finding
+    whether there is one needs only its paths.
+    """
+    for key in ("results_dir", "results_root", "kubeconfig", "attempt"):
+        if record.get(key) is not None and not isinstance(record[key], str):
+            return f"its {key} is not a string"
+    if need_base and (not isinstance(record.get("scale_test_base"), str) or not record["scale_test_base"]):
+        return "it names no scale_test_base"
+    return None
 
 
 def write_state(path: str, state: dict[str, Any]) -> None:
@@ -362,3 +1218,161 @@ def write_state(path: str, state: dict[str, Any]) -> None:
     tmp = target.with_name(target.name + ".tmp")
     tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
     tmp.replace(target)
+
+
+# ─── Run isolation: locks, the record's owner and cluster, the interruption marker ─────
+
+
+def try_lock(path: Path) -> int | None:
+    """Take an exclusive lock on *path* without waiting; the descriptor holding it, or None if held.
+
+    Closing the descriptor (unlock) or exiting releases it, so it never goes stale, and child
+    processes do not inherit it. The file is never removed: removing it would race a process
+    that has just opened it.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def unlock(fd: int) -> None:
+    """Release a lock try_lock took."""
+    os.close(fd)
+
+
+def state_lock(state_file: str) -> int | None:
+    """Lock the state file's record for this step (see try_lock)."""
+    directory = Path(state_file).parent
+    directory.mkdir(parents=True, exist_ok=True)
+    return try_lock(directory / STATE_LOCK)
+
+
+def checkout_lock(base: Path, wait_s: float) -> int | None:
+    """Lock the checkout's env.sh and submit, waiting up to *wait_s* for another run's submit."""
+    deadline = CLOCK.monotonic() + wait_s
+    while (fd := try_lock(base / CHECKOUT_LOCK)) is None:
+        if CLOCK.monotonic() >= deadline:
+            return None
+        CLOCK.sleep(LOCK_RETRY_INTERVAL_S)
+    return fd
+
+
+def owner() -> dict[str, Any]:
+    """Who wrote a record, for messages: this process, its host and its start time."""
+    return {
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "started_utc": f"{datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ}",
+    }
+
+
+def describe_owner(state: dict[str, Any] | None) -> str:
+    """The run that wrote *state*, as "pid P on H since T", or "" when it does not say."""
+    who = (state or {}).get("owner") or {}
+    if not who.get("pid"):
+        return ""
+    return f"pid {who['pid']} on {who.get('hostname', '?')} since {who.get('started_utc', '?')}"
+
+
+def find_unrecorded(state: dict[str, Any]) -> dict[str, Any] | None:
+    """The record of a sweep whose submit never printed its results directory, if one exists."""
+    root = Path(state.get("results_root") or "")
+    if not state.get("results_root") or not root.is_dir():
+        return None
+    new = sorted(p.name for p in root.glob("elbencho-*") if p.name not in set(state.get("existing") or []))
+    return {**state, "results_dir": str(root / new[-1])} if new else None
+
+
+def needs_release(state: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The record of a sweep that may still hold cluster resources; None when there is none.
+
+    A collected sweep, and a submit that never published an attempt, hold nothing. A recorded
+    attempt counts even if its results directory is gone: submit printed it, so the sweep was
+    created. A record the steps cannot read (see record_problem) counts too.
+    """
+    if not state or state.get("collected"):
+        return None
+    if record_problem(state, need_base=False):
+        return state
+    record = state if state.get("results_dir") else find_unrecorded(state)
+    if record is None or not (record.get("attempt") or has_attempt(record["results_dir"])):
+        return None
+    return record
+
+
+def cluster_identity(env: dict[str, str]) -> dict[str, str] | None:
+    """The context and API server the kubeconfig in *env* points at; None if kubectl cannot say.
+
+    A local read of the kubeconfig (``kubectl config view --minify``); nothing else is kept from
+    it. Both are compared, because a shared access proxy can serve several clusters at one URL.
+    """
+    try:
+        ran = run(["kubectl", "config", "view", "--minify", "-o", "json"], IDENTITY_TIMEOUT_S, env)
+    except OSError:
+        return None
+    if ran.returncode != 0:
+        return None
+    try:
+        view = json.loads(ran.stdout)
+        context = view["current-context"]
+        cluster = next(c["context"]["cluster"] for c in view["contexts"] if c["name"] == context)
+        server = next(c["cluster"]["server"] for c in view["clusters"] if c["name"] == cluster)
+    except (ValueError, KeyError, TypeError, StopIteration):
+        return None
+    if not isinstance(context, str) or not isinstance(server, str) or not context or not server:
+        return None
+    return {"context": context, "server": server}
+
+
+def marker_path(state_file: str) -> Path:
+    """Where a run step records that it was interrupted."""
+    return Path(state_file).parent / INTERRUPTED
+
+
+def write_marker(state_file: str, results_dir: str | None) -> None:
+    """Record an interruption: the UTC time and the sweep's results directory, if known.
+
+    A file of its own, so the interrupt handler never rewrites the state file under write_state.
+    """
+    marker = {"interrupted_utc": f"{datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ}", "results_dir": results_dir}
+    marker_path(state_file).write_text(json.dumps(marker), encoding="utf-8")
+
+
+def read_marker(state_file: str) -> dict[str, Any] | None:
+    """The interruption a run step recorded, or None."""
+    try:
+        marker = json.loads(marker_path(state_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return marker if isinstance(marker, dict) else None
+
+
+def remove_marker(state_file: str) -> None:
+    """Forget a recorded interruption once its sweep holds nothing."""
+    marker_path(state_file).unlink(missing_ok=True)
+
+
+def abandoned_records(state_file: str) -> list[str]:
+    """The records --abandon moved aside beside *state_file*: sweeps that may still use the fixtures."""
+    path = Path(state_file)
+    return [str(p) for p in sorted(path.parent.glob(f"{path.stem}.abandoned-*{path.suffix}"))]
+
+
+def unreleased_message(record: dict[str, Any], state_file: str) -> str:
+    """Why a run refuses to start over a sweep that may still hold cluster resources."""
+    problem = record_problem(record)
+    if problem:
+        return (
+            f"{state_file} records a sweep the steps cannot read ({problem}). Check whether that sweep still "
+            "holds cluster resources and release it by hand, then remove the file"
+        )
+    marker = read_marker(state_file) or {}
+    interrupted = f"; interrupted at {marker['interrupted_utc']}" if marker.get("interrupted_utc") else ""
+    return (
+        f"an earlier sweep (results dir {record['results_dir']}{interrupted}) was not released. "
+        "This run's teardown step will try to release it"
+    )

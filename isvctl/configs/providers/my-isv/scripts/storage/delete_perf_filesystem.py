@@ -47,6 +47,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Allow importing provider-local helpers from scripts/common/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.k8s_claim import read_record
+
 # ISVCTL_DEMO_MODE=1 enables demo-success output (used by `make demo-test`).
 DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
 
@@ -61,8 +65,8 @@ def main() -> int:
     args = parser.parse_args()
 
     record = Path(args.record) if args.record else None
-    if not args.filesystem_id and record and record.is_file():
-        recorded = json.loads(record.read_text(encoding="utf-8"))
+    found, recorded = read_record(args.record) if not args.filesystem_id else (False, {})
+    if found:
         args.filesystem_id, args.created = recorded.get("filesystem_id", ""), bool(recorded.get("created"))
 
     result: dict[str, Any] = {

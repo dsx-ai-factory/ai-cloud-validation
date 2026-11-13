@@ -28,7 +28,8 @@ filesystem is fine: report "created": false and teardown leaves it alone. With
 --existing-claim (the perf_claim setting) this already happens here: the
 filesystem is the volume bound to that claim, and nothing is created. With --record the
 result is also written to that file, so a teardown run on its own (`--phase teardown`, which
-has no setup outputs) still knows what to delete.
+has no setup outputs) still knows what to delete. Given an empty --node-selector it stops
+before creating anything: the sweep runs only on labelled nodes.
 
 Required JSON output fields:
   success        (bool) - true once the filesystem is ready to mount
@@ -52,7 +53,7 @@ from typing import Any
 
 # Allow importing provider-local helpers from scripts/common/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from common.k8s_claim import claim_problem, get_claim, recorded_creation
+from common.k8s_claim import adopt_claim, recorded_creation, write_record
 
 # ISVCTL_DEMO_MODE=1 enables demo-success output (used by `make demo-test`).
 DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
@@ -67,6 +68,7 @@ def main() -> int:
     parser.add_argument("--kubeconfig", default="", help="Kubeconfig emitted by setup_cluster (default: kubectl's own)")
     parser.add_argument("--namespace", default="storage-perf", help="Namespace of --existing-claim")
     parser.add_argument("--existing-claim", default="", help="Reuse the volume bound to this claim")
+    parser.add_argument("--node-selector", default=None, help="The sweep's node selector; empty stops setup")
     args = parser.parse_args()
 
     result: dict[str, Any] = {
@@ -77,6 +79,15 @@ def main() -> int:
         "capacity_gib": args.capacity_gib,
         "created": False,
     }
+
+    # The sweep runs only on labelled nodes; without a selector nothing should be created for it.
+    if args.node_selector is not None and not args.node_selector.strip() and not DEMO_MODE:
+        result["error"] = (
+            "no node selector for the sweep: set STORAGE_PERF_NODE_SELECTOR (the perf_node_selector setting), "
+            "e.g. storage-test=true, or report storage_perf.node_selector from setup_cluster"
+        )
+        print(json.dumps(result, indent=2))
+        return 1
 
     # ╔══════════════════════════════════════════════════════════════════╗
     # ║  TODO: Replace this block with your platform's implementation     ║
@@ -97,10 +108,8 @@ def main() -> int:
     elif DEMO_MODE:
         result.update({"success": True, "filesystem_id": "demo-perf-fs", "created": True})
     elif args.existing_claim:
-        pvc, error = get_claim(args.kubeconfig, args.namespace, args.existing_claim)
-        if pvc is not None:
-            error = claim_problem(pvc)
-        if error:
+        pvc, error = adopt_claim(args.kubeconfig, args.namespace, args.existing_claim)
+        if pvc is None:
             result["error"] = error
         else:
             result.update({"success": True, "filesystem_id": pvc["spec"]["volumeName"]})
@@ -108,8 +117,7 @@ def main() -> int:
         result["error"] = "Not implemented - create the filesystem for the performance sweep"
 
     if result["success"] and args.record:
-        Path(args.record).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.record).write_text(json.dumps(result), encoding="utf-8")
+        write_record(args.record, result)
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1
 

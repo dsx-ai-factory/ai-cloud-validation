@@ -24,7 +24,9 @@ has released the sweep's hold on the claim and before delete_perf_filesystem. De
 
 A teardown run on its own (`--phase teardown`) has no setup outputs, so --claim is empty;
 --record then names the file provision_perf_storage wrote, and that file is removed once
-teardown is done with it.
+teardown is done with it. The record also names the cluster the claim was created on: if
+--kubeconfig (or, without one, the recorded kubeconfig) now points at another context or API
+server, nothing is deleted, the step fails and the record is kept.
 
 Required JSON output fields:
   success            (bool) - true once the claim is gone (or was left in place on purpose)
@@ -49,6 +51,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Allow importing provider-local helpers from scripts/common/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.k8s_claim import other_cluster, read_record
+
 # ISVCTL_DEMO_MODE=1 enables demo-success output (used by `make demo-test`).
 DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
 
@@ -65,10 +71,11 @@ def main() -> int:
     args = parser.parse_args()
 
     record = Path(args.record) if args.record else None
-    if not args.claim and record and record.is_file():
-        recorded = json.loads(record.read_text(encoding="utf-8"))
+    _, recorded = read_record(args.record)
+    if not args.claim and recorded:
         args.namespace, args.claim = recorded.get("namespace", ""), recorded.get("claim_name", "")
         args.created = bool(recorded.get("created"))
+    kubeconfig = args.kubeconfig or recorded.get("kubeconfig") or ""
 
     result: dict[str, Any] = {
         "success": False,
@@ -87,6 +94,8 @@ def main() -> int:
         return 0
     if not args.created:
         result.update({"success": True, "message": "claim was not created by this run; left in place"})
+    elif mismatch := other_cluster(recorded.get("cluster"), kubeconfig):
+        result["error"] = mismatch
     else:
         # ╔══════════════════════════════════════════════════════════════════╗
         # ║  TODO: Replace this block with your platform's implementation     ║

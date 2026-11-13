@@ -22,8 +22,12 @@ sweep needs on this machine: elbencho runs in the benchmark Pods from the image 
 pins. --base points at another tree instead (for example a development checkout); isvctl
 writes that tree's env.sh, so dedicate it to isvctl.
 
+With --state-file it also fails setup early, before any fixture is created, when that file
+records a sweep that was never released: the run step would refuse to start anyway, and the
+teardown step, which still runs, releases it. It only reads the file.
+
 Usage:
-    python find_storage_scale_test.py [--base /path/to/storage-scale-test]
+    python find_storage_scale_test.py [--base /path/to/storage-scale-test] [--state-file state.json]
 
 Output JSON:
 {
@@ -49,11 +53,12 @@ import sst
 VENDORED = Path(__file__).resolve().parents[5] / "isvtest" / "vendor" / "storage-scale-test"
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the step's arguments."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base", default="", help="storage-scale-test tree to use instead of the vendored one")
-    return parser.parse_args()
+    parser.add_argument("--state-file", default="", help="run_storage_test.py's state file, to check before setup")
+    return parser.parse_args(argv)
 
 
 def _demo_result() -> dict[str, Any]:
@@ -67,18 +72,33 @@ def _demo_result() -> dict[str, Any]:
     }
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Locate the tree and print the step result."""
-    args = _parse_args()
+    args = _parse_args(argv)
     if sst.DEMO_MODE:
         return sst.emit(_demo_result())
     result: dict[str, Any] = {"success": False, "platform": "storage", "test_name": "find_storage_scale_test"}
+    # Read-only: run_storage_test.py makes the same check under the state file's lock.
+    earlier = sst.needs_release(sst.read_state(args.state_file)) if args.state_file else None
+    if earlier is not None:
+        result["error"] = f"{sst.unreleased_message(earlier, args.state_file)}, unless another run is still using it"
+        return sst.emit(result)
     base = Path(args.base).expanduser().resolve() if args.base else VENDORED
     if not (base / sst.LAUNCHER).is_file():
         hint = "" if args.base else "; run `make vendor` (or `make vendor-storage-scale-test`)"
         result["error"] = f"no storage-scale-test at {base}{hint}"
         return sst.emit(result)
-    result.update({"success": True, "scale_test_base": str(base), "version": sst.tree_version(base)})
+    # The version script runs in its own session; stop it if the step is interrupted.
+    restore = sst.install_interrupt_handler()
+    try:
+        version = sst.tree_version(base)
+    except OSError as exc:
+        # bash missing from PATH (ToolError names it and the likely cause).
+        result["error"] = str(exc)
+        return sst.emit(result)
+    finally:
+        restore()
+    result.update({"success": True, "scale_test_base": str(base), "version": version})
     return sst.emit(result)
 
 

@@ -1850,7 +1850,16 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             **COMMON_PROPERTIES,
             "test_name": {"const": "run_storage_test"},
-            "state": {"type": "string", "description": "storage-scale-test STATE, NOT_SUBMITTED or TIMEOUT"},
+            "state": {
+                "type": "string",
+                "description": (
+                    "storage-scale-test's STATE (e.g. SUCCESS, FAILED, CANCELLED, SUBMISSION_FAILED), or the run's "
+                    "own: NOT_SUBMITTED (refused or failed before submit), REFUSED (another run holds the state "
+                    "file, or it records an earlier sweep that was not released; teardown releases that one), "
+                    "TIMEOUT (outlived its wait), STALLED (no progress), UNREACHABLE (cluster out of reach; left "
+                    "to teardown), STATUS_FAILED (storage-scale-test could not report the state)"
+                ),
+            },
             "resources_released": {"type": ["boolean", "null"], "description": "null until submit got that far"},
             "results_dir": {"type": "string"},
             "executions": {
@@ -1865,6 +1874,11 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "collect_error": {"type": "string"},
             "failed_execution": {"type": "string"},
             "failed_log": {"type": "string"},
+            "run_log": {
+                "type": "string",
+                "description": "The run's progress log: one line per status check, cancel and collect",
+            },
+            "warning": {"type": "string", "description": "A large collection that was still submitted"},
         },
         "if": {"properties": {"success": {"const": True}}, "required": ["success"]},
         "then": {
@@ -1915,6 +1929,15 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             **COMMON_PROPERTIES,
             "test_name": {"const": "release_storage_test"},
             "released": {"type": "boolean", "description": "The sweep holds no cluster resources"},
+            "abandoned": {
+                "type": "boolean",
+                "description": "The unreleased sweep's record was moved aside (--abandon); it may still hold resources",
+            },
+            "abandoned_records": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Records --abandon moved aside; their sweeps may still use the fixtures, so teardown keeps them",
+            },
             "results_dir": {"type": "string"},
             "message": {"type": "string"},
             "error": {"type": "string"},

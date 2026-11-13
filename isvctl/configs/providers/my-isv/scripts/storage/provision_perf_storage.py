@@ -29,7 +29,9 @@ deprovision_perf_storage leaves it alone; --existing-claim (the perf_claim setti
 this here, after checking the claim is usable. The sweep writes only under its test path (default
 "scale-test") inside the claim, which must be writable by the benchmark Pods' UID/GID
 (default 2000). With --record the result is also written to that file, so a teardown run on
-its own (`--phase teardown`, which has no setup outputs) still knows what to delete.
+its own (`--phase teardown`, which has no setup outputs) still knows what to delete. The
+record also names the kubeconfig and the cluster it points at (context and API server, no
+credentials); deprovision_perf_storage deletes the claim only on that cluster.
 
 Required JSON output fields:
   success     (bool) - true once the claim is Bound
@@ -54,7 +56,7 @@ from typing import Any
 
 # Allow importing provider-local helpers from scripts/common/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from common.k8s_claim import claim_problem, get_claim, recorded_creation
+from common.k8s_claim import adopt_claim, cluster_identity, recorded_creation, write_record
 
 # ISVCTL_DEMO_MODE=1 enables demo-success output (used by `make demo-test`).
 DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
@@ -98,10 +100,8 @@ def main() -> int:
     elif DEMO_MODE:
         result.update({"success": True, "claim_name": "demo-perf-claim", "created": True})
     elif args.existing_claim:
-        pvc, error = get_claim(args.kubeconfig, args.namespace, args.existing_claim)
-        if pvc is not None:
-            error = claim_problem(pvc)
-        if error:
+        pvc, error = adopt_claim(args.kubeconfig, args.namespace, args.existing_claim)
+        if pvc is None:
             result["error"] = error
         else:
             result.update({"success": True, "claim_name": args.existing_claim})
@@ -109,8 +109,10 @@ def main() -> int:
         result["error"] = "Not implemented - expose the filesystem as a Bound ReadWriteMany PVC"
 
     if result["success"] and args.record:
-        Path(args.record).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.record).write_text(json.dumps(result), encoding="utf-8")
+        record = {**result, "kubeconfig": args.kubeconfig}
+        if not DEMO_MODE:
+            record["cluster"] = cluster_identity(args.kubeconfig)
+        write_record(args.record, record)
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1
 
