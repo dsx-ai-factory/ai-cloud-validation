@@ -318,6 +318,7 @@ class TestRun:
         assert env["E2E_EXTRA_GINKGO_ARGS"] == "--procs=50"
 
     def test_without_e2e_concurrency_no_extra_ginkgo_args_are_passed(self) -> None:
+        """Leaving e2e_concurrency unset keeps the Pod env as it was."""
         with patch.object(K8sCncfConformanceCheck, "_apply_manifest", return_value=True) as apply:
             _run_check(_happy_router(), {"mode": "non-disruptive-conformance"})
 
@@ -327,6 +328,7 @@ class TestRun:
 
     @pytest.mark.parametrize("concurrency", [0, -4, "many", 2.5, True])
     def test_invalid_e2e_concurrency_fails_before_the_pod_is_created(self, concurrency: object) -> None:
+        """A value that is not a positive integer fails the check without applying the manifest."""
         router = _happy_router()
         check = _run_check(router, {"mode": "non-disruptive-conformance", "e2e_concurrency": concurrency})
 
