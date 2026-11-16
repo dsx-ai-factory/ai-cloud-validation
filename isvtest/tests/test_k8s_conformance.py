@@ -306,6 +306,34 @@ class TestRun:
         env = {item["name"]: item["value"] for item in pod["spec"]["containers"][0]["env"]}
         assert [name for name in candidates if re.search(env["E2E_FOCUS"], name)] == [lifecycle]
 
+    def test_e2e_concurrency_sets_the_ginkgo_process_count(self) -> None:
+        """e2e_concurrency reaches ginkgo as --procs through the go-runner's extra-args variable."""
+        with patch.object(K8sCncfConformanceCheck, "_apply_manifest", return_value=True) as apply:
+            check = _run_check(_happy_router(), {"mode": "non-disruptive-conformance", "e2e_concurrency": 50})
+
+        assert check.passed
+        manifest = list(yaml.safe_load_all(apply.call_args.args[0]))
+        pod = next(item for item in manifest if item["kind"] == "Pod")
+        env = {item["name"]: item["value"] for item in pod["spec"]["containers"][0]["env"]}
+        assert env["E2E_EXTRA_GINKGO_ARGS"] == "--procs=50"
+
+    def test_without_e2e_concurrency_no_extra_ginkgo_args_are_passed(self) -> None:
+        with patch.object(K8sCncfConformanceCheck, "_apply_manifest", return_value=True) as apply:
+            _run_check(_happy_router(), {"mode": "non-disruptive-conformance"})
+
+        manifest = list(yaml.safe_load_all(apply.call_args.args[0]))
+        pod = next(item for item in manifest if item["kind"] == "Pod")
+        assert "E2E_EXTRA_GINKGO_ARGS" not in {item["name"] for item in pod["spec"]["containers"][0]["env"]}
+
+    @pytest.mark.parametrize("concurrency", [0, -4, "many", 2.5, True])
+    def test_invalid_e2e_concurrency_fails_before_the_pod_is_created(self, concurrency: object) -> None:
+        router = _happy_router()
+        check = _run_check(router, {"mode": "non-disruptive-conformance", "e2e_concurrency": concurrency})
+
+        assert not check.passed
+        assert "e2e_concurrency" in check.message
+        assert not any("apply" in cmd for cmd in router.seen)
+
     @pytest.mark.parametrize("mode", ["quick", "certified-conformance", "non-disruptive-conformance"])
     @pytest.mark.parametrize("report_individual", [True, False])
     @pytest.mark.parametrize("suite_hooks", [False, True])

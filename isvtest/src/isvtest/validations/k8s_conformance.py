@@ -160,6 +160,13 @@ class K8sCncfConformanceCheck(BaseValidation):
         cleanup_namespace = bool(self.config.get("cleanup_namespace", True))
         report_individual = bool(self.config.get("report_individual_tests", True))
 
+        concurrency = self.config.get("e2e_concurrency")
+        if concurrency is not None and (
+            isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1
+        ):
+            self.set_failed(f"Invalid e2e_concurrency {concurrency!r} (expected a positive integer)")
+            return
+
         preset = self._MODE_PRESETS[mode]
         env_vars = {
             "E2E_FOCUS": self.config.get("e2e_focus", preset["focus"]),
@@ -168,6 +175,9 @@ class K8sCncfConformanceCheck(BaseValidation):
             "E2E_PROVIDER": self.config.get("e2e_provider", "skeleton"),
             "RESULTS_DIR": self._RESULTS_DIR,
         }
+        if concurrency is not None:
+            # the conformance image's go-runner appends this to the ginkgo command line
+            env_vars["E2E_EXTRA_GINKGO_ARGS"] = f"--procs={concurrency}"
 
         resources = {key: str(self.config.get(key, default)) for key, default in self._DEFAULT_RESOURCES.items()}
 

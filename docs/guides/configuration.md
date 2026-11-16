@@ -798,6 +798,13 @@ uv run isvctl test run -f isvctl/configs/providers/<your-platform>/config/storag
 | `non-disruptive-conformance` | `[Conformance]` minus `[Disruptive]` and `[Serial]` tests. Safe to run against clusters carrying other workloads. |
 | `quick` | Single ConfigMap test. Smoke-tests the harness end-to-end without exercising real conformance coverage. |
 
+Every mode runs one ginkgo process unless told otherwise. `e2e_concurrency: N` runs `N` processes (the conformance
+image passes it to ginkgo as `--procs=N`). `e2e_parallel: "true"` lets ginkgo choose: one process per CPU, minus one, of
+the node the e2e Pod lands on. That scales with cores, not with the pods the cluster can hold. On a few large nodes
+it can exceed the pod capacity and fail specs with `OutOfpods`, so prefer an explicit `e2e_concurrency` there. Raise
+`memory_limit` with the process count. `non-disruptive-conformance` already leaves out `[Serial]`, so it is safe to
+parallelize.
+
 ### Dual-stack node and pod validation
 
 `K8sDualStackNodeCheck` observes node `InternalIP` addresses and the allocated `status.podIPs`
