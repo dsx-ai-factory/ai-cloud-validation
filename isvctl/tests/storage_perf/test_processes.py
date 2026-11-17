@@ -110,10 +110,17 @@ def wait_until(condition: Any, seconds: float = 10) -> bool:
 
 
 def read_pid(path: Path, what: str) -> int:
-    """The pid *what* writes to *path*, waiting (really) up to 20 s."""
-    if not wait_until(path.is_file, 20):
+    """The pid *what* writes to *path*, waiting (really) up to 20 s for the file to hold one."""
+
+    def pid() -> int | None:
+        try:
+            return int(path.read_text())
+        except (OSError, ValueError):
+            return None
+
+    if not wait_until(lambda: pid() is not None, 20):
         pytest.fail(f"{what} never wrote its pid to {path}")
-    return int(path.read_text())
+    return pid()
 
 
 class Reaper:

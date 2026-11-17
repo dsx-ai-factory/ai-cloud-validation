@@ -2743,7 +2743,7 @@ mappings:
       - req_id: SPERF05
         source: storage-perf-prd
         coverage: partial
-    annotations: 'Placeholder mapping. Partial: teardown releases every sweep left under the results root on every exit isvctl survives (failure, wait deadline); after an interrupted run (Ctrl-C) or a lost client, release needs a later --phase teardown or --collect from the sweep directory.'
+    annotations: 'Placeholder mapping. Partial: teardown attempts to release every sweep left under the results root on every exit isvctl survives (failure, wait deadline); when the cluster is out of reach it reports released false, and release needs a later --phase teardown. After an interrupted run (Ctrl-C) or a lost client, release needs a later --phase teardown or --collect from the sweep directory.'
     notes: ''
   - test_id: SPERF07-01
     requirements:

@@ -296,3 +296,18 @@ def test_release_with_an_unwritable_results_root_gives_json(perf: InProcess, tmp
     assert rc == 1 and out["released"] is False
     assert out["error"].startswith(f"cannot lock {directory}: ")
     assert_schema("release_storage_test", out)
+
+
+def test_release_with_an_unlistable_results_root_is_not_released(perf: InProcess, launcher: FakeLauncher) -> None:
+    """A results root the step can lock but not list fails; it never reads as nothing held."""
+    directory = launcher.base / "results"
+    directory.mkdir(exist_ok=True)
+    directory.chmod(0o300)
+    try:
+        rc, out = perf("release_storage_test", f"--results-dir={directory}", f"--scale-test-base={launcher.base}")
+    finally:
+        directory.chmod(0o700)
+
+    assert rc == 1 and out["released"] is False
+    assert "Permission denied" in out["error"]
+    assert_schema("release_storage_test", out)

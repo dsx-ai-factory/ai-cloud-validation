@@ -159,20 +159,16 @@ def test_storage_perf_values_come_from_setup_cluster_then_the_settings(
 
 
 @pytest.mark.parametrize(
-    ("env", "expected"), [({"KUBECONFIG": "/k/config"}, "/k/config"), ({}, "")], ids=["kubeconfig", "kubectls-own"]
+    "outputs",
+    [{}, {"setup_cluster": {}}, {"setup_cluster": {"kubeconfig_path": None}}],
+    ids=["no-setup", "none", "null"],
 )
-def test_without_setup_outputs_run_and_teardown_use_kubeconfig(
-    env: dict[str, str], expected: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`--phase teardown` (or a setup that reports none) uses KUBECONFIG, or kubectl's own when unset."""
-    monkeypatch.delenv("KUBECONFIG", raising=False)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
+def test_without_a_setup_kubeconfig_run_and_teardown_inherit_kubeconfig(outputs: dict[str, Any]) -> None:
+    """With no kubeconfig_path from setup (`--phase teardown`, say), --kubeconfig is empty, never "None"."""
+    run = _render("run_storage_test", outputs=outputs)
+    release = _render("release_storage_test", outputs=outputs)
 
-    run = _render("run_storage_test", outputs={})
-    release = _render("release_storage_test", outputs={})
-
-    assert _flag(run, "--kubeconfig") == _flag(release, "--kubeconfig") == expected
+    assert _flag(run, "--kubeconfig") == _flag(release, "--kubeconfig") == ""
     assert _flag(release, "--results-dir").endswith("_output/storage-perf/results")
 
 

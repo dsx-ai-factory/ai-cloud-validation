@@ -726,7 +726,8 @@ def unreleased(base: Path, results_root: str, env: dict[str, str]) -> list[tuple
     The teardown step releases each one it returns.
     """
     found = []
-    for path in sorted(Path(results_root).glob("elbencho-*")):
+    # iterdir, not glob: glob hides a directory it cannot list, which would read as nothing held.
+    for path in sorted(p for p in Path(results_root).iterdir() if p.name.startswith("elbencho-")):
         if not (path / CURRENT_ATTEMPT).is_file():
             continue
         kind, status = query(base, str(path), env, lock_window_s=LOCK_WINDOW_S)

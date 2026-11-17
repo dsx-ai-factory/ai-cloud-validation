@@ -37,10 +37,10 @@ commands:
     # Arguments are "--flag", "value" pairs, except "--flag=value" where the value can
     # render empty: isvctl drops an empty argument, which would leave the flag without its
     # value. A setting given an empty value (`--set tests.settings.perf_claim=`) is null, so
-    # those render through default('', true) rather than as "None". The run and teardown
-    # steps use setup_cluster's kubeconfig_path if it reports one, else perf_kubeconfig
-    # (KUBECONFIG, or kubectl's current context when unset): run `--phase teardown` with the
-    # same kubeconfig and context as the run.
+    # those render through default('', true) rather than as "None". Every step, setup
+    # included, uses KUBECONFIG (kubectl's current context when unset), unless setup_cluster
+    # reports a kubeconfig_path: run `--phase teardown` with the same kubeconfig and context
+    # as the run, or point KUBECONFIG at a file to keep the whole run on one cluster.
     steps:
       # The current cluster's inventory; it creates nothing. A provider that creates its
       # cluster replaces this with its own, reporting kubeconfig_path, and may also report
@@ -60,7 +60,7 @@ commands:
         command: "python ../../../shared/storage/perf/run_storage_test.py"
         requires: [kubernetes]
         args:
-          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default(perf_kubeconfig, true)}}"
+          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default('', true)}}"
           - "--claim={{steps.setup_cluster.storage_perf.claim | default(perf_claim, true) | default('', true)}}"
           - "--node-selector={{steps.setup_cluster.storage_perf.node_selector | default(perf_node_selector, true) | default('', true)}}"
           - "--nodes"
@@ -107,7 +107,7 @@ commands:
         args:
           - "--results-dir"
           - "{{perf_results_dir}}"
-          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default(perf_kubeconfig, true)}}"
+          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default('', true)}}"
         output_schema: storage_perf_release
         # Self-limiting (see the step's docstring); no isvctl timeout.
         timeout: null
@@ -130,9 +130,6 @@ tests:
     # results and logs - goes under _output/, which git ignores, in the directory isvctl runs
     # from.
     perf_results_dir: "{{env.PWD | default('.', true)}}/_output/storage-perf/results"
-    # The cluster to test: KUBECONFIG, or kubectl's current context when unset. Point
-    # KUBECONFIG at a file to keep the whole run, teardown included, on one cluster.
-    perf_kubeconfig: "{{env.KUBECONFIG | default('', true)}}"
     # Smoke sweep: 2 cells, 10 s per phase.
     perf_nodes: "1"
     # Comma-separated IO sizes (r prefix = random); no WRITE,READ pairs (see the guide).

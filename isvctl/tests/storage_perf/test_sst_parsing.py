@@ -141,6 +141,19 @@ def test_status_reasons_cover_the_vendored_vocabulary() -> None:
     assert {*SST.REASONS_ACCESS, SST.CANCELLATION_INCOMPLETE} <= set(match.group(1).split("|"))
 
 
+# --- The environment storage-scale-test runs with ---
+
+
+@pytest.mark.parametrize(("kubeconfig", "expected"), [("", "/shell/config"), ("/run/config", "/run/config")])
+def test_child_env_uses_the_given_kubeconfig_else_the_shells(
+    kubeconfig: str, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty --kubeconfig keeps the shell's KUBECONFIG, so every step uses the same cluster."""
+    monkeypatch.setenv("KUBECONFIG", "/shell/config")
+
+    assert SST.child_env(kubeconfig)["KUBECONFIG"] == expected
+
+
 # --- Counting a sweep's cells ---
 
 

@@ -89,9 +89,8 @@ A step that exits 0 has its JSON output validated against a schema in
 
 ## The cluster
 
-The run and teardown steps, and storage-scale-test's own `kubectl` calls, use
-`KUBECONFIG`, or kubectl's current context when it is unset (the `perf_kubeconfig`
-setting). So run `--phase teardown` with the same kubeconfig and context as the
+Every step, and storage-scale-test's own `kubectl` calls, use `KUBECONFIG`, or
+kubectl's current context when it is unset. So run `--phase teardown` with the same kubeconfig and context as the
 run, and do not switch context while a run is going. To keep a whole run on one
 cluster, point `KUBECONFIG` at a file for that cluster. storage-scale-test also
 checks that each lifecycle command reaches the cluster its sweep runs on. A
@@ -143,29 +142,42 @@ small random IO size gives far higher IOPS and far lower bandwidth than 1M.
 
 ### Time limits
 
-`run_storage_test` polls the sweep's status every 60 s until it finishes or its
-deadline (`perf_wait_timeout_s`) passes. `auto` (the default) sizes the deadline
-from the sweep's cells and phase duration: twice the estimate, at least 900 s and
-at most 12 h. A sweep `auto` cannot fit in 12 h is rejected (`NOT_SUBMITTED`).
-A number waits that many seconds, up to 12 h.
+The deadline (`perf_wait_timeout_s`) limits only how long `run_storage_test` waits
+for the sweep to finish. It counts from the end of submit (up to 600 s), not its start:
 
-A status check that cannot read the sweep's state (the cluster is out of reach,
-say) says nothing about the sweep, which runs on in-cluster, so the run just
-checks again at the next poll; the progress log records each miss. At the
-deadline the run cancels the sweep, collects it (which releases its cluster
-resources) and fails with `TIMEOUT`, unless the sweep finished before the cancel
-reached it. If the cancel or collect fails (the cluster is still out of reach,
-say), the run says so and the teardown step tries again. A status error that
-persists (for example after the claim was replaced) also just waits out the
-deadline.
+1. The run submits the sweep and checks its status every 60 s. A check that cannot
+   read the state (the cluster is out of reach, say) says nothing about the sweep,
+   which runs on in-cluster, so the run just checks again; the progress log records
+   each miss.
+2. If the sweep finishes before the deadline, the run collects it (which releases
+   its cluster resources) and reports its state.
+3. If the deadline passes first, the run cancels the sweep, then collects what
+   finished, and fails with `TIMEOUT`, unless the sweep finished before the cancel
+   reached it. The last wait is cut short at the deadline, but a status check already
+   running can take up to 300 s, so the cancel can start up to about 5 minutes late.
+   If the cancel or collect fails (the cluster is still out of reach, say), the run says so and
+   the teardown step tries again.
 
-`run_storage_test`, `evaluate_storage_test` and `release_storage_test` have no
-isvctl `timeout`. Their own limits bound them: 300 s for each status check, 600 s
-for submit and each cancel, 8400 s for collecting (at most two `--collect` calls
-of 3900 s, each confirmed by a status check), and, for the report extractor,
-1800 s or 2 s per cell, whichever is larger. So a run takes at most its deadline
-plus about 3.5 h, and much less in practice: storage-scale-test gives up on each
-kubectl call that cannot reach the cluster after 30 s.
+`auto` (the default) sizes the deadline from the sweep's cells and phase duration:
+twice the estimate, at least 900 s and at most 12 h. A sweep `auto` cannot fit in
+12 h is rejected (`NOT_SUBMITTED`). A number waits that many seconds, up to 12 h. A
+status error that persists (for example after the claim was replaced) also just
+waits out the deadline.
+
+The steps have no isvctl `timeout`; each storage-scale-test call has its own limit:
+300 s for a status check, 600 s for submit and for each cancel (up to 3), and 3900 s
+for each collect (up to 2), each confirmed by a status check. So each step has its
+own bound:
+
+| Step | At most |
+|---|---|
+| `run_storage_test` | the deadline, plus about 3.5 h to submit, cancel and collect |
+| `evaluate_storage_test` | the report extractor's limit: 1800 s, or 2 s per cell if larger |
+| `release_storage_test` | about 3.5 h for each sweep it releases (they are released one at a time) |
+
+Set any CI job limit above the sum, or teardown can be cut short. In practice these
+limits are rarely reached: storage-scale-test gives up on each kubectl call that
+cannot reach the cluster after 30 s.
 
 Each run writes a progress log to `_output/storage-perf/results/run-logs/`, one
 line per estimate, submit, status check, cancel and collect. isvctl does not print
