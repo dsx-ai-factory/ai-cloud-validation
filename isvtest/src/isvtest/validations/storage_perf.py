@@ -22,11 +22,11 @@ report, so a run passing with report-only floors still shows them. Each check re
 single result, so it reports no subtests: isvctl's run summary shows a passing check's
 own message only when it has none (otherwise it prints "N subtests passed").
 
-Classes map to the storage performance requirements in ``docs/test-plan.yaml``:
+Classes map to the High-Speed Storage requirement HSS02 in ``docs/test-plan.yaml``:
 
-    - StoragePerfResultsPresentCheck   SPERF07-01  complete write and read results
-    - StoragePerfBandwidthFloorCheck   SPERF08-01  bandwidth meets the configured floor
-    - StoragePerfIopsFloorCheck        SPERF08-02  IOPS meets the configured floor
+    - StoragePerfResultsPresentCheck   HSS02-02  complete write and read results
+    - StoragePerfBandwidthFloorCheck   HSS02-03  bandwidth meets the configured floor
+    - StoragePerfIopsFloorCheck        HSS02-04  IOPS meets the configured floor
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ def _floor_message(validation: BaseValidation, test_name: str, field: str, unit:
 
 
 class StoragePerfResultsPresentCheck(BaseValidation):
-    """Validate the sweep reported complete write and read results (SPERF07-01).
+    """Validate the sweep reported complete write and read results (HSS02-02).
 
     Config:
         step_output: The evaluate_storage_test step output
@@ -96,7 +96,7 @@ class StoragePerfResultsPresentCheck(BaseValidation):
 
 
 class StoragePerfBandwidthFloorCheck(BaseValidation):
-    """Validate measured bandwidth meets the configured floor (SPERF08-01).
+    """Validate measured bandwidth meets the configured floor (HSS02-03).
 
     Config:
         step_output: The evaluate_storage_test step output
@@ -115,7 +115,7 @@ class StoragePerfBandwidthFloorCheck(BaseValidation):
 
 
 class StoragePerfIopsFloorCheck(BaseValidation):
-    """Validate measured IOPS meets the configured floor (SPERF08-02).
+    """Validate measured IOPS meets the configured floor (HSS02-04).
 
     Config:
         step_output: The evaluate_storage_test step output

@@ -3446,12 +3446,12 @@ a| https://github.com/dsx-ai-factory/ai-cloud-validation/issues/504[#504]
 .5+| Storage Performance
 .5+| IO benchmark sweep (storage-scale-test) against an existing provider claim, reporting real bandwidth, IOPS and latency
 .5+| storage-scale-test elbencho sweep on Kubernetes
-| [[SPERF03-01]]SPERF03-01
-| SPERF03
+| [[HSS07-03]]HSS07-03
+| HSS07
 |
-| kubernetes, performance, storage
+| kubernetes, offtake, performance, storage
 | tenant
-| Placeholder id; replace when the official storage performance requirements and test list are onboarded.
+| Partial HSS07 coverage: a sweep across the selected nodes completes on the provider filesystem.
 | P1
 a|
 |
@@ -3461,12 +3461,12 @@ a|
 | pending
 |
 
-| [[SPERF05-01]]SPERF05-01
-| SPERF05
+| [[HSS07-04]]HSS07-04
+| HSS07
 |
-| kubernetes, performance, storage
+| kubernetes, offtake, performance, storage
 | tenant
-| Placeholder id; replace when the official storage performance requirements and test list are onboarded.
+| Partial HSS07 coverage: the sweep releases every cluster resource it held.
 | P1
 a|
 |
@@ -3476,12 +3476,12 @@ a|
 | pending
 |
 
-| [[SPERF07-01]]SPERF07-01
-| SPERF07
+| [[HSS02-02]]HSS02-02
+| HSS02
 |
-| kubernetes, performance, storage
+| kubernetes, offtake, performance, storage
 | tenant
-| Placeholder id; replace when the official storage performance requirements and test list are onboarded.
+| Partial HSS02 coverage: complete measured write and read bandwidth, IOPS and latency.
 | P1
 a|
 |
@@ -3491,12 +3491,12 @@ a|
 | pending
 |
 
-| [[SPERF08-01]]SPERF08-01
-| SPERF08
+| [[HSS02-03]]HSS02-03
+| HSS02
 |
-| kubernetes, performance, storage
+| kubernetes, offtake, performance, storage
 | tenant
-| Placeholder id; replace when the official storage performance requirements and test list are onboarded.
+| Partial HSS02 coverage: measured bandwidth against a configured floor (0 = report only).
 | P1
 a|
 |
@@ -3506,12 +3506,12 @@ a|
 | pending
 |
 
-| [[SPERF08-02]]SPERF08-02
-| SPERF08
+| [[HSS02-04]]HSS02-04
+| HSS02
 |
-| kubernetes, performance, storage
+| kubernetes, offtake, performance, storage
 | tenant
-| Placeholder id; replace when the official storage performance requirements and test list are onboarded.
+| Partial HSS02 coverage: measured IOPS against a configured floor (0 = report only).
 | P1
 a|
 |

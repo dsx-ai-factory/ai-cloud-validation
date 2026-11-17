@@ -1587,6 +1587,33 @@ docs/requirements/test-requirements-matrix.yaml. Run `make plan` to regenerate.
 | full
 |
 
+| [[HSS02-02]]HSS02-02
+| Data Services
+| Storage Performance
+| Verify the sweep reports complete write and read results
+| HSS02
+| offtake
+| partial
+|
+
+| [[HSS02-03]]HSS02-03
+| Data Services
+| Storage Performance
+| Verify measured bandwidth meets the configured floor
+| HSS02
+| offtake
+| partial
+|
+
+| [[HSS02-04]]HSS02-04
+| Data Services
+| Storage Performance
+| Verify measured IOPS meets the configured floor
+| HSS02
+| offtake
+| partial
+|
+
 | [[HSS03-01]]HSS03-01
 | Data Services
 | SDS Controller
@@ -2133,6 +2160,24 @@ docs/requirements/test-requirements-matrix.yaml. Run `make plan` to regenerate.
 | Verify large-directory listing of 1,000,000 files and 500,000 subdirectories without error or truncation
 | N-013b
 | storage
+| partial
+|
+
+| [[HSS07-03]]HSS07-03
+| Data Services
+| Storage Performance
+| Verify a storage-scale-test IO sweep runs to completion against the claim
+| HSS07
+| offtake
+| partial
+|
+
+| [[HSS07-04]]HSS07-04
+| Data Services
+| Storage Performance
+| Verify the sweep releases every cluster resource it held
+| HSS07
+| offtake
 | partial
 |
 
@@ -3800,50 +3845,5 @@ docs/requirements/test-requirements-matrix.yaml. Run `make plan` to regenerate.
 | offtake
 | partial
 | Corroborates supplied provisioning ranges and fresh allocations; does not prove cluster reconfiguration or provider network range APIs.
-
-| [[SPERF03-01]]SPERF03-01
-| Data Services
-| Storage Performance
-| Verify a storage-scale-test IO sweep runs to completion against the claim
-| SPERF03
-| storage-perf-prd
-| full
-|
-
-| [[SPERF05-01]]SPERF05-01
-| Data Services
-| Storage Performance
-| Verify the sweep releases every cluster resource it held
-| SPERF05
-| storage-perf-prd
-| partial
-|
-
-| [[SPERF07-01]]SPERF07-01
-| Data Services
-| Storage Performance
-| Verify the sweep reports complete write and read results
-| SPERF07
-| storage-perf-prd
-| full
-|
-
-| [[SPERF08-01]]SPERF08-01
-| Data Services
-| Storage Performance
-| Verify measured bandwidth meets the configured floor
-| SPERF08
-| storage-perf-prd
-| full
-|
-
-| [[SPERF08-02]]SPERF08-02
-| Data Services
-| Storage Performance
-| Verify measured IOPS meets the configured floor
-| SPERF08
-| storage-perf-prd
-| full
-|
 
 |===
