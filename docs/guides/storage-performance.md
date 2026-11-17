@@ -69,18 +69,21 @@ sweep from submit to release.
 | teardown | `release_storage_test` | Releases every sweep under the results root that still holds cluster resources |
 | teardown | `teardown_cluster` | Provider: removes what setup created (nothing, as shipped) |
 
+Two tests: one for the sweep, with a subtest per stage, and one for releasing it, which
+happens in teardown, a later phase.
+
 | Check | Test ID | Step | Passes when |
 |---|---|---|---|
-| `StoragePerfSweepCompletedCheck` | `HSS07-03` | `run_storage_test` | The sweep finished with state `SUCCESS` |
+| `StoragePerfSweepCheck` | `HSS02-02` | `evaluate_storage_test` | All four subtests pass: `sweep_completed` (the run step finished the sweep with state `SUCCESS`), `results_present` (`batch_outcome.complete` is true, with write and read numbers), `bandwidth_meets_min` (`perf_min_mbps`) and `iops_meets_min` (`perf_min_iops`) |
 | `StoragePerfSweepReleasedCheck` | `HSS07-04` | `release_storage_test` | No sweep still holds cluster resources |
-| `StoragePerfResultsPresentCheck` | `HSS02-02` | `evaluate_storage_test` | `batch_outcome.complete` is true, with write and read numbers |
-| `StoragePerfBandwidthFloorCheck` | `HSS02-03` | `evaluate_storage_test` | Bandwidth meets `perf_min_mbps` |
-| `StoragePerfIopsFloorCheck` | `HSS02-04` | `evaluate_storage_test` | IOPS meets `perf_min_iops` |
 
-The three results checks are classes (`isvtest/src/isvtest/validations/storage_perf.py`)
-rather than generic composites, so the report shows the measured numbers: for example
-`StoragePerfBandwidthFloorCheck: PASSED - 7123.0 MB/s (report only, no floor set); write
-7123.0 MB/s, read 7628.4 MB/s`, or, below a floor, `7123.0 MB/s < floor 100000.0 MB/s`.
+The sweep test is a class (`isvtest/src/isvtest/validations/storage_perf.py`), so each
+subtest carries the measured numbers: for example `bandwidth_meets_min: 7123.0 MB/s
+(report only, no floor set); write 7123.0 MB/s, read 7628.4 MB/s`, or, below a floor,
+`7123.0 MB/s < floor 100000.0 MB/s`. On a pass, isvctl's run summary shows only
+`4 subtests passed` (the JUnit report lists the four subtests, without messages); the
+numbers are in the sweep directory's `report.txt` and `results.json`. On a failure the
+summary names the failed subtests and why.
 
 The test IDs, defined in `docs/test-plan.yaml`, map to the High-Speed Storage
 requirements HSS02 (performance: bandwidth and IOPS) and HSS07 (parallel filesystem at

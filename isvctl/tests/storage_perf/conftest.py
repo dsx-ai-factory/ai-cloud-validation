@@ -101,6 +101,7 @@ UNPLANNED_COMMAND = "unexpected command run from a test"
 LIFECYCLE = ("--status", "--cancel", "--collect")
 
 RUN_OK: dict[str, Any] = {
+    "success": True,
     "state": "SUCCESS",
     "executions": {"total": 2, "succeeded": 2, "failed": 0},
     "resources_released": True,

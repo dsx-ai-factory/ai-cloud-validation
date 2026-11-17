@@ -1218,21 +1218,10 @@ mappings:
       - req_id: HSS02
         source: offtake
         coverage: partial
-    annotations: 'Storage performance sweep (storage-scale-test): complete measured write and read results; does not provision or assert a QoS class.'
-    notes: ''
-  - test_id: HSS02-03
-    requirements:
-      - req_id: HSS02
+      - req_id: HSS07
         source: offtake
         coverage: partial
-    annotations: 'Storage performance sweep: slower operation''s best bandwidth against perf_min_mbps (0 = report only). HSS02-01 (HssQosThroughputCheck) covers provider QoS limits.'
-    notes: ''
-  - test_id: HSS02-04
-    requirements:
-      - req_id: HSS02
-        source: offtake
-        coverage: partial
-    annotations: 'Storage performance sweep: slower operation''s best IOPS against perf_min_iops (0 = report only). HSS02-01 (HssQosThroughputCheck) covers provider QoS limits.'
+    annotations: 'Storage performance sweep (storage-scale-test), one test with a subtest per stage: the sweep across the selected nodes completed, complete measured write and read results, and the slower operation''s best bandwidth and IOPS against perf_min_mbps and perf_min_iops (0 = report only). Does not provision or assert a QoS class (HSS02-01 covers provider QoS limits); scale is the configured node counts, not thousands of clients.'
     notes: ''
   - test_id: HSS03-01
     requirements:
@@ -1576,13 +1565,6 @@ mappings:
         source: storage
         coverage: partial
     annotations: ''
-    notes: ''
-  - test_id: HSS07-03
-    requirements:
-      - req_id: HSS07
-        source: offtake
-        coverage: partial
-    annotations: 'Storage performance sweep across the selected nodes completes on the provider filesystem; scale is the configured node counts, not thousands of clients.'
     notes: ''
   - test_id: HSS07-04
     requirements:

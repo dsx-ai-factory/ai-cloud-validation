@@ -18,9 +18,10 @@
 
 The run's last test-phase step. It reads the run step's result and the
 machine-readable results document (results.json) that storage-scale-test's extractor writes
-with --to-json, and reports the headline numbers. It passes when every execution's results
-parsed completely with write and read rates. Whether the sweep finished and released its
-cluster resources is checked on the run and teardown steps' own output.
+with --to-json, and reports the headline numbers. It passes when the run step finished the
+sweep with state SUCCESS, every execution's results parsed completely with write and read
+rates, and the floors are met. Whether the sweep released its cluster resources is checked
+on the teardown step's own output.
 
 Headline rates are elbencho's [first] figures, the ones storage-scale-test's own reports use.
 
@@ -43,6 +44,7 @@ Output JSON:
         "read": {...}
     },
     "tests": {
+        "sweep_completed":     {"passed": true, "message": "SUCCESS, 2/2 executions"},
         "results_present":     {"passed": true},
         "bandwidth_meets_min": {"passed": true, "measured_mbps": 180.2, "min_mbps": 0},
         "iops_meets_min":      {"passed": true, "measured_iops": 171.0, "min_iops": 0}
@@ -64,6 +66,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # shared/storage/perf/
 import sst
 
 OPERATIONS = ("write", "read")
+TERMINAL_OK = "SUCCESS"
 RESULTS_JSON = "results.json"
 RESULTS_SCHEMA = "storage-scale-test/filesystem-batch-results"
 # The extractor's default limit: EXTRACT_S_PER_CELL per cell of the sweep, at least
@@ -129,6 +132,7 @@ def _demo_result(min_mbps: float, min_iops: float) -> dict[str, Any]:
         "test_name": "evaluate_storage_test",
         "headline": headline,
         "tests": {
+            "sweep_completed": {"passed": True, "message": "SUCCESS, 2/2 executions"},
             "results_present": {"passed": True},
             "bandwidth_meets_min": {"passed": True, "measured_mbps": 180.0, "min_mbps": min_mbps},
             "iops_meets_min": {"passed": True, "measured_iops": 170.0, "min_iops": min_iops},
@@ -270,6 +274,17 @@ def _results_message(document: dict[str, Any] | None, incomplete: list[str], rep
     return f"{len(_io_executions(document))} executions in {RESULTS_JSON}"
 
 
+def _sweep_completed(run: dict[str, Any]) -> dict[str, Any]:
+    """Whether the run step finished the sweep with state SUCCESS, with its execution counts."""
+    state = run.get("state") or "no state"
+    executions = run.get("executions") or {}
+    counts = f", {executions.get('succeeded')}/{executions.get('total')} executions" if executions else ""
+    if run.get("success") is True and state == TERMINAL_OK:
+        return {"passed": True, "message": f"{state}{counts}"}
+    reason = run.get("error") or "the run step reported no result"
+    return {"passed": False, "error": f"run step ended {state}{counts}: {reason}"}
+
+
 def _evaluate(
     run: dict[str, Any],
     document: dict[str, Any] | None,
@@ -284,6 +299,7 @@ def _evaluate(
     slowest_mbps = min(best[op]["best_mbps"] for op in OPERATIONS) if present else None
     slowest_iops = min(best[op]["best_iops"] for op in OPERATIONS) if present else None
     tests = {
+        "sweep_completed": _sweep_completed(run),
         "results_present": {"passed": present, "message": _results_message(document, incomplete, report_error)},
         "bandwidth_meets_min": _floor_test(slowest_mbps, min_mbps, "mbps"),
         "iops_meets_min": _floor_test(slowest_iops, min_iops, "iops"),

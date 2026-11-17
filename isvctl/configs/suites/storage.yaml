@@ -560,23 +560,21 @@ tests:
     # default to 0 (report only).
     # test_ids map to the High-Speed Storage requirements HSS02 (performance) and HSS07
     # (parallel filesystem at scale) in docs/references/requirements-for-ai-clouds-v2.4.md.
+    # One sweep, one test: a class (validations/storage_perf.py) that reports each stage as
+    # a subtest - sweep_completed (from the run step's result), results_present,
+    # bandwidth_meets_min and iops_meets_min - with the measured numbers in each, even when
+    # floors are 0 (report only).
     perf_sweep:
-      step: run_storage_test
+      step: evaluate_storage_test
       checks:
-        StoragePerfSweepCompletedCheck:
-          test_id: "HSS07-03"
+        StoragePerfSweepCheck:
+          test_id: "HSS02-02"
           labels: ["kubernetes", "offtake", "performance", "storage"]
           requires: [kubernetes]
-          description: "Check the storage-scale-test sweep ran to completion and was collected"
-          compose:
-            - StepSuccessCheck
-            - FieldValueCheck:
-                field: "state"
-                expected: "SUCCESS"
 
-    # Bound to the teardown step, not run_storage_test: it reports whether the sweep was
-    # released whoever released it, including when run_storage_test was killed and
-    # printed no output.
+    # A separate test, bound to the teardown step (a later phase than the sweep test): it
+    # reports whether the sweep was released whoever released it, including when
+    # run_storage_test was killed and printed no output.
     perf_release:
       step: release_storage_test
       checks:
@@ -589,24 +587,6 @@ tests:
             - FieldValueCheck:
                 field: "released"
                 expected: true
-
-    # Classes (validations/storage_perf.py), not composites, so the report shows the
-    # measured numbers even when floors are 0 (report only).
-    perf_results:
-      step: evaluate_storage_test
-      checks:
-        StoragePerfResultsPresentCheck:
-          test_id: "HSS02-02"
-          labels: ["kubernetes", "offtake", "performance", "storage"]
-          requires: [kubernetes]
-        StoragePerfBandwidthFloorCheck:
-          test_id: "HSS02-03"
-          labels: ["kubernetes", "offtake", "performance", "storage"]
-          requires: [kubernetes]
-        StoragePerfIopsFloorCheck:
-          test_id: "HSS02-04"
-          labels: ["kubernetes", "offtake", "performance", "storage"]
-          requires: [kubernetes]
 
     # ─── Teardown tests ──────────────────────────────────────────────
     teardown_checks:

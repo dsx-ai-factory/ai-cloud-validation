@@ -13,20 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Storage performance validations for the storage-scale-test sweep.
+"""Storage performance validation for the storage-scale-test sweep.
 
-Provider-neutral assertions over ``evaluate_storage_test``'s output: its ``tests``
+A provider-neutral assertion over ``evaluate_storage_test``'s output: its ``tests``
 results and its ``headline`` (per operation: best MB/s, best IOPS, lowest average
-latency). Unlike a generic composite, each check puts the measured numbers in the
-report, so a run passing with report-only floors still shows them. Each check reads a
-single result, so it reports no subtests: isvctl's run summary shows a passing check's
-own message only when it has none (otherwise it prints "N subtests passed").
+latency). One sweep is one test: ``StoragePerfSweepCheck`` (HSS02-02 in
+``docs/test-plan.yaml``) reports each stage as a subtest, with the measured numbers in
+its message, so a run passing with report-only floors still shows them:
 
-Classes map to the High-Speed Storage requirement HSS02 in ``docs/test-plan.yaml``:
+    - sweep_completed       the run step finished the sweep with state SUCCESS
+    - results_present       complete write and read results
+    - bandwidth_meets_min   bandwidth meets the configured floor (0 = report only)
+    - iops_meets_min        IOPS meets the configured floor (0 = report only)
 
-    - StoragePerfResultsPresentCheck   HSS02-02  complete write and read results
-    - StoragePerfBandwidthFloorCheck   HSS02-03  bandwidth meets the configured floor
-    - StoragePerfIopsFloorCheck        HSS02-04  IOPS meets the configured floor
+Releasing the sweep is checked separately (HSS07-04, on the teardown step), since it
+happens in a later phase.
 """
 
 from __future__ import annotations
@@ -34,6 +35,8 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from isvtest.core.validation import BaseValidation
+
+SUBTESTS = ("sweep_completed", "results_present", "bandwidth_meets_min", "iops_meets_min")
 
 
 def _step_output(validation: BaseValidation) -> dict[str, Any]:
@@ -48,17 +51,14 @@ def _headline(validation: BaseValidation, field: str, unit: str) -> str:
     return ", ".join(parts)
 
 
-def _require(validation: BaseValidation, test_name: str, fail_label: str) -> bool:
-    """Fail the check unless the step's ``tests[test_name]`` passed; True if it did."""
-    tests = _step_output(validation).get("tests")
-    if not tests:
-        validation.set_failed("No 'tests' in step output")
-        return False
-    result = tests.get(test_name) or {}
-    if not result.get("passed"):
-        validation.set_failed(f"{fail_label}: {test_name}: {result.get('error', 'test not found')}")
-        return False
-    return True
+def _results_message(validation: BaseValidation) -> str:
+    """Format complete results as each operation's best bandwidth, IOPS and latency."""
+    headline = _step_output(validation).get("headline") or {}
+    summary = "; ".join(
+        f"{op}: {n.get('best_mbps')} MB/s, {n.get('best_iops')} IOPS, {n.get('min_avg_latency_ms')} ms avg latency"
+        for op, n in headline.items()
+    )
+    return f"Complete results ({summary})" if summary else "Complete results"
 
 
 def _floor_message(validation: BaseValidation, test_name: str, field: str, unit: str) -> str:
@@ -70,64 +70,44 @@ def _floor_message(validation: BaseValidation, test_name: str, field: str, unit:
     return f"{test.get(f'measured_{field}', 'N/A')} {unit} ({verdict})" + (f"; {per_op}" if per_op else "")
 
 
-class StoragePerfResultsPresentCheck(BaseValidation):
-    """Validate the sweep reported complete write and read results (HSS02-02).
+class StoragePerfSweepCheck(BaseValidation):
+    """Validate one storage-scale-test sweep, one subtest per stage (HSS02-02).
 
     Config:
         step_output: The evaluate_storage_test step output
 
     Step output:
-        tests: dict with results_present
+        tests: dict with sweep_completed, results_present, bandwidth_meets_min
+               (measured_mbps, min_mbps) and iops_meets_min (measured_iops, min_iops)
         headline: per operation samples, best_mbps, best_iops, min_avg_latency_ms
     """
 
-    description: ClassVar[str] = "Check the collected reports hold real write and read results"
+    description: ClassVar[str] = (
+        "Check the sweep completed with real write and read results that meet the floors (0 = report only)"
+    )
 
     def run(self) -> None:
-        """Validate results are complete, reporting the headline numbers."""
-        if not _require(self, "results_present", "Storage performance results incomplete"):
+        """Report each stage as a subtest; pass only if all of them passed."""
+        tests = _step_output(self).get("tests")
+        if not tests:
+            self.set_failed("No 'tests' in step output")
             return
-        headline = _step_output(self).get("headline") or {}
-        summary = "; ".join(
-            f"{op}: {n.get('best_mbps')} MB/s, {n.get('best_iops')} IOPS, {n.get('min_avg_latency_ms')} ms avg latency"
-            for op, n in headline.items()
-        )
-        self.set_passed(f"Complete results ({summary})" if summary else "Complete results")
-
-
-class StoragePerfBandwidthFloorCheck(BaseValidation):
-    """Validate measured bandwidth meets the configured floor (HSS02-03).
-
-    Config:
-        step_output: The evaluate_storage_test step output
-
-    Step output:
-        tests: dict with bandwidth_meets_min (measured_mbps, min_mbps)
-    """
-
-    description: ClassVar[str] = "Check measured bandwidth meets the configured floor (0 = report only)"
-
-    def run(self) -> None:
-        """Validate bandwidth against the floor, reporting the measured MB/s."""
-        if not _require(self, "bandwidth_meets_min", "Bandwidth below the configured floor"):
+        messages = {
+            "sweep_completed": (tests.get("sweep_completed") or {}).get("message", ""),
+            "results_present": _results_message(self),
+            "bandwidth_meets_min": _floor_message(self, "bandwidth_meets_min", "mbps", "MB/s"),
+            "iops_meets_min": _floor_message(self, "iops_meets_min", "iops", "IOPS"),
+        }
+        failed = []
+        for name in SUBTESTS:
+            result = tests.get(name) or {}
+            if result.get("passed"):
+                self.report_subtest(name, True, messages[name])
+            else:
+                error = result.get("error", "test not found")
+                failed.append(f"{name}: {error}")
+                self.report_subtest(name, False, error)
+        if failed:
+            self.set_failed("Storage performance sweep failed: " + "; ".join(failed))
             return
-        self.set_passed(_floor_message(self, "bandwidth_meets_min", "mbps", "MB/s"))
-
-
-class StoragePerfIopsFloorCheck(BaseValidation):
-    """Validate measured IOPS meets the configured floor (HSS02-04).
-
-    Config:
-        step_output: The evaluate_storage_test step output
-
-    Step output:
-        tests: dict with iops_meets_min (measured_iops, min_iops)
-    """
-
-    description: ClassVar[str] = "Check measured IOPS meets the configured floor (0 = report only)"
-
-    def run(self) -> None:
-        """Validate IOPS against the floor, reporting the measured IOPS."""
-        if not _require(self, "iops_meets_min", "IOPS below the configured floor"):
-            return
-        self.set_passed(_floor_message(self, "iops_meets_min", "iops", "IOPS"))
+        self.set_passed(f"Sweep completed; {messages['results_present']}")

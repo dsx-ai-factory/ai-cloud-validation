@@ -2687,7 +2687,7 @@ a| https://github.com/dsx-ai-factory/ai-cloud-validation/issues/215[#215]
 | pending
 |
 
-.62+| Data Services
+.59+| Data Services
 .34+| SDS Controller
 .19+| Manages software-defined storage services and policies. Orchestrates provisioning, tiers, and resiliency.
 .19+| AWS: EBS + FSx backend control planes
@@ -3443,21 +3443,21 @@ a| https://github.com/dsx-ai-factory/ai-cloud-validation/issues/504[#504]
 | published
 |
 
-.5+| Storage Performance
-.5+| IO benchmark sweep (storage-scale-test) against an existing provider claim, reporting real bandwidth, IOPS and latency
-.5+| storage-scale-test elbencho sweep on Kubernetes
-| [[HSS07-03]]HSS07-03
-| HSS07
+.2+| Storage Performance
+.2+| IO benchmark sweep (storage-scale-test) against an existing provider claim, reporting real bandwidth, IOPS and latency
+.2+| storage-scale-test elbencho sweep on Kubernetes
+| [[HSS02-02]]HSS02-02
+| HSS02
 |
 | kubernetes, offtake, performance, storage
 | tenant
-| Partial HSS07 coverage: a sweep across the selected nodes completes on the provider filesystem.
+| Partial HSS02 and HSS07 coverage: one test with a subtest per stage - the sweep across the selected nodes completed, complete measured write and read bandwidth, IOPS and latency, and bandwidth and IOPS against configured floors (0 = report only).
 | P1
 a|
 |
 |
 |
-| Verify a storage-scale-test IO sweep runs to completion against the claim
+| Verify a storage-scale-test IO sweep completes with complete write and read results that meet the configured floors
 | pending
 |
 
@@ -3473,51 +3473,6 @@ a|
 |
 |
 | Verify the sweep releases every cluster resource it held
-| pending
-|
-
-| [[HSS02-02]]HSS02-02
-| HSS02
-|
-| kubernetes, offtake, performance, storage
-| tenant
-| Partial HSS02 coverage: complete measured write and read bandwidth, IOPS and latency.
-| P1
-a|
-|
-|
-|
-| Verify the sweep reports complete write and read results
-| pending
-|
-
-| [[HSS02-03]]HSS02-03
-| HSS02
-|
-| kubernetes, offtake, performance, storage
-| tenant
-| Partial HSS02 coverage: measured bandwidth against a configured floor (0 = report only).
-| P1
-a|
-|
-|
-|
-| Verify measured bandwidth meets the configured floor
-| pending
-|
-
-| [[HSS02-04]]HSS02-04
-| HSS02
-|
-| kubernetes, offtake, performance, storage
-| tenant
-| Partial HSS02 coverage: measured IOPS against a configured floor (0 = report only).
-| P1
-a|
-|
-|
-|
-| Verify measured IOPS meets the configured floor
 | pending
 |
 

@@ -3174,7 +3174,7 @@ domains:
           - description: IO benchmark sweep (storage-scale-test) against an existing provider claim, reporting real bandwidth, IOPS and latency
             example: storage-scale-test elbencho sweep on Kubernetes
             tests:
-              - summary: Verify a storage-scale-test IO sweep runs to completion against the claim
+              - summary: Verify a storage-scale-test IO sweep completes with complete write and read results that meet the configured floors
                 labels:
                   - kubernetes
                   - offtake
@@ -3182,9 +3182,9 @@ domains:
                   - storage
                 priority: P1
                 milestone: ""
-                notes: "Partial HSS07 coverage: a sweep across the selected nodes completes on the provider filesystem."
-                req_id: HSS07
-                test_id: HSS07-03
+                notes: "Partial HSS02 and HSS07 coverage: one test with a subtest per stage - the sweep across the selected nodes completed, complete measured write and read bandwidth, IOPS and latency, and bandwidth and IOPS against configured floors (0 = report only)."
+                req_id: HSS02
+                test_id: HSS02-02
                 actor: tenant
                 status: pending
               - summary: Verify the sweep releases every cluster resource it held
@@ -3198,45 +3198,6 @@ domains:
                 notes: "Partial HSS07 coverage: the sweep releases every cluster resource it held."
                 req_id: HSS07
                 test_id: HSS07-04
-                actor: tenant
-                status: pending
-              - summary: Verify the sweep reports complete write and read results
-                labels:
-                  - kubernetes
-                  - offtake
-                  - performance
-                  - storage
-                priority: P1
-                milestone: ""
-                notes: "Partial HSS02 coverage: complete measured write and read bandwidth, IOPS and latency."
-                req_id: HSS02
-                test_id: HSS02-02
-                actor: tenant
-                status: pending
-              - summary: Verify measured bandwidth meets the configured floor
-                labels:
-                  - kubernetes
-                  - offtake
-                  - performance
-                  - storage
-                priority: P1
-                milestone: ""
-                notes: "Partial HSS02 coverage: measured bandwidth against a configured floor (0 = report only)."
-                req_id: HSS02
-                test_id: HSS02-03
-                actor: tenant
-                status: pending
-              - summary: Verify measured IOPS meets the configured floor
-                labels:
-                  - kubernetes
-                  - offtake
-                  - performance
-                  - storage
-                priority: P1
-                milestone: ""
-                notes: "Partial HSS02 coverage: measured IOPS against a configured floor (0 = report only)."
-                req_id: HSS02
-                test_id: HSS02-04
                 actor: tenant
                 status: pending
       - name: Object Storage Service

@@ -51,6 +51,26 @@ def test_evaluate_reports_numbers_without_a_floor() -> None:
     assert_schema("evaluate_storage_test", out)
 
 
+@pytest.mark.parametrize(
+    ("run", "expected"),
+    [
+        (RUN_OK, {"passed": True, "message": "SUCCESS, 2/2 executions"}),
+        (
+            {**RUN_OK, "success": False, "state": "TIMEOUT", "error": "sweep did not finish within 900s"},
+            {"passed": False, "error": "run step ended TIMEOUT, 2/2 executions: sweep did not finish within 900s"},
+        ),
+        ({}, {"passed": False, "error": "run step ended no state: the run step reported no result"}),
+    ],
+    ids=["success", "timeout", "no-run"],
+)
+def test_evaluate_reports_whether_the_run_completed_the_sweep(run: dict[str, Any], expected: dict[str, Any]) -> None:
+    """sweep_completed passes only for a run step that succeeded with state SUCCESS, and fails the step otherwise."""
+    out = EVALUATE._evaluate(run, document(), 0.0, 0.0)
+
+    assert out["tests"]["sweep_completed"] == expected
+    assert out["success"] is expected["passed"]
+
+
 def test_evaluate_enforces_a_configured_floor() -> None:
     """A floor above the slower operation fails the bandwidth test only."""
     out = EVALUATE._evaluate(RUN_OK, document(), 120.0, 0.0)
