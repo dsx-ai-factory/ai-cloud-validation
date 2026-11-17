@@ -28,7 +28,11 @@ uv run isvctl test run \
   checks.
 - The claim must be Bound, ReadWriteMany and Filesystem-mode, and mountable on
   every selected node. The sweep writes only under `scale-test/` inside it, as
-  UID/GID 2000, so that directory must be writable by them.
+  UID/GID 2000. Create that directory before the first run, writable by them:
+  storage-scale-test does not create it, and a missing one fails submit in phase
+  `test-dir-access` (reported as `API_UNAVAILABLE` or `TIMEOUT`). For example, from
+  a short-lived Pod that mounts the claim: `mkdir -p <mount>/scale-test && chmod 0777
+  <mount>/scale-test`.
 - `setup_cluster` is `scripts/k8s/setup.sh`: it inventories the cluster kubectl
   points at and creates nothing. Check kubectl's context before you start (see
   [The cluster](#the-cluster)).

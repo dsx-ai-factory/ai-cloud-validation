@@ -115,6 +115,22 @@ def test_describe_failure_says_what_to_do_next() -> None:
     )
 
 
+def test_describe_failure_without_error_lines_skips_diagnostic_fields() -> None:
+    """With no Error: line, the message is the last plain line, never a raw diagnostic field."""
+    stderr = (
+        "realpath: /mnt/c/scale-test: No such file or directory\n"
+        "STORAGE_SCALE_TEST_DIAGNOSTIC_REASON=TIMEOUT\n"
+        "STORAGE_SCALE_TEST_DIAGNOSTIC_PHASE=test-dir-access\n"
+        "STORAGE_SCALE_TEST_DIAGNOSTIC_SAFE_NEXT_ACTION=retry\\ the\\ same\\ command\n"
+    )
+
+    assert SST.describe_failure(stderr) == (
+        "realpath: /mnt/c/scale-test: No such file or directory (TIMEOUT, phase test-dir-access); "
+        "next: retry the same command"
+    )
+    assert SST.describe_failure("STORAGE_SCALE_TEST_DIAGNOSTIC_REASON=AUTH\n") == "no error output (AUTH)"
+
+
 def test_parse_kv_unquotes_shell_quoted_diagnostics() -> None:
     """storage-scale-test writes diagnostic values and FAILED_LOG with printf %q."""
     fields = SST.parse_kv(

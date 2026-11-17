@@ -370,7 +370,9 @@ def describe_failure(stderr: str) -> str:
     if reason:
         detail = f" ({reason}, phase {phase})" if phase else f" ({reason})"
     # All of them: a failed settings check prints one line per problem, then a generic summary.
-    message = "; ".join(errors) if errors else (stderr.strip().splitlines() or ["no error output"])[-1]
+    # Without Error: lines, the last line that is not a diagnostic field (those are reported below).
+    plain = [line.strip() for line in stderr.splitlines() if line.strip() and not line.startswith(DIAGNOSTIC_PREFIX)]
+    message = "; ".join(errors) if errors else (plain or ["no error output"])[-1]
     extra = []
     if fields.get("MAY_STILL_BE_RUNNING") in ("yes", "unknown"):
         extra.append(f"may still be running: {fields['MAY_STILL_BE_RUNNING']}")
