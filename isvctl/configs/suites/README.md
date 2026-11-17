@@ -330,6 +330,22 @@ volume. The three test-phase steps all reuse that fixture.
 | `teardown_volume` | teardown | `providers/my-isv/scripts/storage/teardown_volume.py` | `resources_deleted`, `message` |
 | `teardown` | teardown | `providers/my-isv/scripts/vm/teardown.py` | `resources_deleted`, `message` (reuses VM script) |
 
+**Performance (opt-in).** The Performance group's checks bind to steps that only the
+command overlay `providers/my-isv/config/overlays/storage-perf.yaml` supplies (load it after
+`storage.yaml`, with `--capability kubernetes --label performance`). The sweep runs on an
+existing claim, named by `STORAGE_PERF_CLAIM`; the benchmark steps are shared, so a provider
+supplies only `setup_cluster` (as shipped, the generic `scripts/k8s/setup.sh`, which
+inventories the current cluster and creates nothing). `setup_cluster` uses the `generic` schema; every
+other step's output has a `storage_perf_*` schema. See
+[Storage Performance](../../../docs/guides/storage-performance.md).
+
+| Step | Phase | Script | Key JSON Fields |
+|------|-------|--------|-----------------|
+| `setup_cluster` | setup | `providers/my-isv/scripts/k8s/setup.sh` | optional `kubeconfig_path` (else `KUBECONFIG`) and `storage_perf.{claim,node_selector}` |
+| `run_storage_test` | test | `shared/storage/perf/run_storage_test.py` | `state`, `results_dir`, `executions`, `resources_released`, `progress_log` |
+| `evaluate_storage_test` | test | `shared/storage/perf/evaluate_storage_test.py` | `headline`, `tests.{results_present,bandwidth_meets_min,iops_meets_min}` |
+| `release_storage_test` | teardown | `shared/storage/perf/release_storage_test.py` | `released`, `message` |
+
 ### Kubernetes (`k8s.yaml`)
 
 | Step | Phase | Script |

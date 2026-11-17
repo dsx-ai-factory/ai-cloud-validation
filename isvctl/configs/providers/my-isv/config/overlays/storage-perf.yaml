@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# my-isv Storage Performance Overlay - Living Example
+#
+# Opt-in overlay for the Performance checks in suites/storage.yaml. Load it after
+# config/storage.yaml; its steps replace that file's, so the run does only the sweep:
+#
+#   make vendor   # once (or just this tool: make vendor-storage-scale-test)
+#   STORAGE_PERF_CLAIM=my-namespace/my-claim STORAGE_PERF_NODE_SELECTOR=storage-test=true \
+#   uv run isvctl test run \
+#       -f isvctl/configs/providers/my-isv/config/storage.yaml \
+#       -f isvctl/configs/providers/my-isv/config/overlays/storage-perf.yaml \
+#       --capability kubernetes --label performance
+#
+# Commands are relative to config/, not this overlay. The sweep runs on an existing claim;
+# the steps are shared (isvctl/configs/shared/storage/perf/). Settings, prerequisites and
+# what to do when a run fails: docs/guides/storage-performance.md
+
+version: "1.0"
+
+commands:
+  storage:
+    phases: ["setup", "test", "teardown"]
+    # Arguments are "--flag", "value" pairs, except "--flag=value" where the value can
+    # render empty: isvctl drops an empty argument, which would leave the flag without its
+    # value. A setting given an empty value (`--set tests.settings.perf_claim=`) is null, so
+    # those render through default('', true) rather than as "None". The run and teardown
+    # steps use setup_cluster's kubeconfig_path if it reports one, else perf_kubeconfig
+    # (KUBECONFIG, or kubectl's current context when unset): run `--phase teardown` with the
+    # same kubeconfig and context as the run.
+    steps:
+      # The current cluster's inventory; it creates nothing. A provider that creates its
+      # cluster replaces this with its own, reporting kubeconfig_path, and may also report
+      # a storage_perf block (claim as namespace/claim, node_selector) from its own APIs.
+      # Each value it leaves out falls back to the matching perf_* setting.
+      - name: setup_cluster
+        phase: setup
+        command: "../scripts/k8s/setup.sh"
+        requires: [kubernetes]
+        output_schema: generic
+        timeout: 120
+
+      # Submit, wait, collect. continue_on_failure lets evaluate_storage_test report what
+      # a failed sweep left behind.
+      - name: run_storage_test
+        phase: test
+        command: "python ../../../shared/storage/perf/run_storage_test.py"
+        requires: [kubernetes]
+        args:
+          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default(perf_kubeconfig, true)}}"
+          - "--claim={{steps.setup_cluster.storage_perf.claim | default(perf_claim, true) | default('', true)}}"
+          - "--node-selector={{steps.setup_cluster.storage_perf.node_selector | default(perf_node_selector, true) | default('', true)}}"
+          - "--nodes"
+          - "{{perf_nodes}}"
+          - "--io-sizes"
+          - "{{perf_io_sizes}}"
+          - "--threads"
+          - "{{perf_threads}}"
+          - "--iodepth"
+          - "{{perf_iodepth}}"
+          - "--duration"
+          - "{{perf_duration_s}}"
+          - "--results-dir"
+          - "{{perf_results_dir}}"
+          - "--wait-timeout"
+          - "{{perf_wait_timeout_s}}"
+          - "--live-interval-ms"
+          - "{{perf_live_interval_ms}}"
+        output_schema: storage_perf_run
+        continue_on_failure: true
+        # Self-limiting (see the step's docstring); no isvctl timeout.
+        timeout: null
+
+      # Reads the sweep's results.json and compares it with the floors; 0 only reports.
+      - name: evaluate_storage_test
+        phase: test
+        command: "python ../../../shared/storage/perf/evaluate_storage_test.py"
+        requires: [kubernetes]
+        args:
+          - "--run={{steps.run_storage_test | default({}, true) | tojson}}"
+          - "--min-mbps={{perf_min_mbps | default('', true)}}"
+          - "--min-iops={{perf_min_iops | default('', true)}}"
+        output_schema: storage_perf_evaluate
+        # Self-limiting (see the step's docstring); no isvctl timeout.
+        timeout: null
+
+      # Releases every unreleased sweep under the results root, not just run_storage_test's:
+      # an interrupted run step prints no output, and that is when this step has work to do.
+      # Run `--phase teardown` from the run's directory: the results root is under it.
+      - name: release_storage_test
+        phase: teardown
+        command: "python ../../../shared/storage/perf/release_storage_test.py"
+        requires: [kubernetes]
+        args:
+          - "--results-dir"
+          - "{{perf_results_dir}}"
+          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default(perf_kubeconfig, true)}}"
+        output_schema: storage_perf_release
+        # Self-limiting (see the step's docstring); no isvctl timeout.
+        timeout: null
+
+      # setup_cluster created nothing, so there is nothing to remove.
+      - name: teardown_cluster
+        phase: teardown
+        command: "../scripts/k8s/teardown.sh"
+        requires: [kubernetes]
+        timeout: 60
+
+tests:
+  settings:
+    # What the sweep uses on the cluster, from whoever knows it: the environment, --set,
+    # or an -f override file. A storage_perf value setup_cluster reports wins over these.
+    # Both are required: an existing Bound ReadWriteMany claim, and the worker node labels.
+    perf_claim: "{{env.STORAGE_PERF_CLAIM | default('', true)}}"
+    perf_node_selector: "{{env.STORAGE_PERF_NODE_SELECTOR | default('', true)}}"
+    # Everything a run generates - the target and workload files beside storage-scale-test's
+    # results and logs - goes under _output/, which git ignores, in the directory isvctl runs
+    # from.
+    perf_results_dir: "{{env.PWD | default('.', true)}}/_output/storage-perf/results"
+    # The cluster to test: KUBECONFIG, or kubectl's current context when unset. Point
+    # KUBECONFIG at a file to keep the whole run, teardown included, on one cluster.
+    perf_kubeconfig: "{{env.KUBECONFIG | default('', true)}}"
+    # Smoke sweep: 2 cells, 10 s per phase.
+    perf_nodes: "1"
+    # Comma-separated IO sizes (r prefix = random); no WRITE,READ pairs (see the guide).
+    perf_io_sizes: "r4K,1M"
+    perf_threads: "1"
+    perf_iodepth: "1"
+    perf_duration_s: "10"
+    # Wait for the sweep: "auto" (sized from its cells and phase duration) or seconds; at
+    # most 12 h either way. At the deadline the run cancels and collects the sweep.
+    perf_wait_timeout_s: "auto"
+    # elbencho's live statistics interval. Its per-interval CSVs feed storage-scale-test's own
+    # reports; they are what grows a collect.
+    perf_live_interval_ms: "1000"
+    # Report only. Set to your own expectations to enforce a floor; empty also reports only.
+    perf_min_mbps: "0"
+    perf_min_iops: "0"

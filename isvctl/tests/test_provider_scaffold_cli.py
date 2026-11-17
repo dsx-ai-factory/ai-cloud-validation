@@ -634,3 +634,15 @@ def test_dry_run_does_not_create_target(tmp_path: Path) -> None:
     assert "Would create provider scaffold:" in result.output
     assert "Preview without cloud:" in result.output
     assert not target.exists()
+
+
+def test_command_overlay_shared_paths_resolve_from_config_dir(tmp_path: Path) -> None:
+    """Test a command overlay's shared-script paths are rewritten to resolve from config/."""
+    target = tmp_path / "acme"
+
+    result = runner.invoke(main_app, ["provider", "scaffold", "acme", "--output-dir", str(target)])
+
+    assert result.exit_code == 0, result.output
+    overlay = (target / "config" / "overlays" / "storage-perf.yaml").read_text(encoding="utf-8")
+    assert "../../../shared/" not in overlay
+    assert "isvctl/configs/shared/storage/perf/run_storage_test.py" in overlay
