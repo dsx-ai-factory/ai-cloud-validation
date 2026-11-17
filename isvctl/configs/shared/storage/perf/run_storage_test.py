@@ -292,7 +292,7 @@ def _run_locked(
         sst.unlock(checkout)
     if sweep_dir:
         result["results_dir"] = sweep_dir
-    if error:
+    if error or not sweep_dir:
         # Whatever submit left in the results root, teardown finds there (sst.unreleased).
         result["error"] = error
         return

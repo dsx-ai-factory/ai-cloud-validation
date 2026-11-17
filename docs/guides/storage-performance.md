@@ -102,6 +102,11 @@ checks that each lifecycle command reaches the cluster its sweep runs on. A
 provider that creates its cluster replaces `setup_cluster` and reports that
 cluster's `kubeconfig_path`, which the run and teardown steps then use.
 
+A results root belongs to one cluster. Teardown checks every sweep under it
+against the current cluster, so sweeps that ran on another cluster read as
+unreleased there, and teardown reports `released: false` on every run until they
+are moved out. Run each cluster from its own directory.
+
 ## Settings
 
 Set these in your provider config's `tests.settings`, or per run with
@@ -294,6 +299,8 @@ its wait, and was cancelled and collected).
 | The run was interrupted (Ctrl-C), so teardown never ran. The sweep keeps running in-cluster and holds the claim; isvctl does not show the interrupted step's output, so the rerun hint is the last line of the progress log | Rerun the same command with `--phase teardown`, from the same directory |
 | Rejected before submit (`NOT_SUBMITTED`): a setting is invalid or the sweep is too large | Fix the setting the error names |
 | Submit failed (`NOT_SUBMITTED`) because an earlier sweep holds the claim | Rerun; the teardown step has already released it if it was in this results root |
+| Submit failed (`NOT_SUBMITTED`) in phase `test-dir-access` | Check that `scale-test/` exists on the claim and is writable by UID/GID 2000. On a fresh claim (NFS especially), the first write can also outlast storage-scale-test's 30 s limit: rerun |
+| Teardown reported `released: false` for sweeps that ran on another cluster | Move those sweep directories out of this results root, or run each cluster from its own directory |
 | The sweep outlived its wait (`TIMEOUT`) | Raise `perf_wait_timeout_s`, or shrink the sweep |
 | Teardown reported `released: false`: the cluster was out of reach, or `KUBECONFIG` or the context now points at another cluster | Once the cluster answers, run `--phase teardown` with the run's kubeconfig and context |
 | Teardown reported `released: false` because another run or teardown holds the results root's lock | Wait for it to finish, then run `--phase teardown` |
