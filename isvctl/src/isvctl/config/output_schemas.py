@@ -176,6 +176,10 @@ STEP_SCHEMA_MAPPING: dict[str, str | None] = {
     "fetch_upstream_k8s_versions": "k8s_upstream_versions",
     "list_k8s_versions": "k8s_offered_versions",
     "describe_control_plane_patching": "k8s_control_plane_patching",
+    # Storage performance (config/overlays/storage-perf.yaml and the shared perf steps)
+    "run_storage_test": "storage_perf_run",
+    "evaluate_storage_test": "storage_perf_evaluate",
+    "release_storage_test": "storage_perf_release",
 }
 
 # Common fields present in all outputs
@@ -1784,6 +1788,102 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
         "additionalProperties": True,
+    },
+    # =========================================================================
+    # Storage performance (storage-scale-test sweep)
+    # =========================================================================
+    # Fields later steps read are required only on success, so a failed step's
+    # diagnostics still validate and reach the report.
+    "storage_perf_run": {
+        "type": "object",
+        "required": ["success", "platform", "test_name", "state", "resources_released"],
+        "properties": {
+            **COMMON_PROPERTIES,
+            "test_name": {"const": "run_storage_test"},
+            "state": {
+                "type": "string",
+                "description": (
+                    "storage-scale-test's STATE (e.g. SUCCESS, FAILED, CANCELLED, SUBMISSION_FAILED), or the run's "
+                    "own: NOT_SUBMITTED, REFUSED or TIMEOUT (docs/guides/storage-performance.md)"
+                ),
+            },
+            "resources_released": {"type": ["boolean", "null"], "description": "null when nothing was submitted"},
+            "scale_test_version": {"type": "string", "description": "storage-scale-test's version"},
+            "results_dir": {"type": "string", "description": "The sweep directory (elbencho-*) under the results root"},
+            "executions": {
+                "type": "object",
+                "properties": {
+                    "total": {"type": "integer", "minimum": 0},
+                    "succeeded": {"type": "integer", "minimum": 0},
+                    "failed": {"type": "integer", "minimum": 0},
+                },
+            },
+            "error": {"type": "string"},
+            "collect_error": {"type": "string"},
+            "failed_execution": {"type": "string"},
+            "failed_log": {"type": "string"},
+            "progress_log": {
+                "type": "string",
+                "description": "The run's progress log: one line per estimate, submit, status check, cancel and collect",
+            },
+        },
+        "if": {"properties": {"success": {"const": True}}, "required": ["success"]},
+        "then": {
+            "required": ["results_dir", "executions"],
+            "properties": {"state": {"const": "SUCCESS"}, "resources_released": {"const": True}},
+        },
+        "additionalProperties": True,
+        "description": "run_storage_test: submit, wait for and collect a storage-scale-test sweep",
+    },
+    "storage_perf_evaluate": {
+        "type": "object",
+        "required": ["success", "platform", "test_name"],
+        "properties": {
+            **COMMON_PROPERTIES,
+            "test_name": {"const": "evaluate_storage_test"},
+            "results_dir": {"type": ["string", "null"], "description": "The sweep directory it evaluated"},
+            "headline": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "object",
+                    "required": ["samples", "best_mbps", "best_iops"],
+                    "properties": {
+                        "samples": {"type": "integer", "minimum": 0},
+                        "best_mbps": {"type": "number"},
+                        "best_iops": {"type": "number"},
+                        "min_avg_latency_ms": {"type": ["number", "null"]},
+                    },
+                },
+            },
+            "tests": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "object",
+                    "required": ["passed"],
+                    "properties": {"passed": {"type": "boolean"}},
+                },
+            },
+        },
+        "if": {"properties": {"success": {"const": True}}, "required": ["success"]},
+        "then": {"required": ["headline", "tests"]},
+        "additionalProperties": True,
+        "description": "evaluate_storage_test: headline numbers and pass/fail per test",
+    },
+    "storage_perf_release": {
+        "type": "object",
+        "required": ["success", "platform", "test_name", "released"],
+        "properties": {
+            **COMMON_PROPERTIES,
+            "test_name": {"const": "release_storage_test"},
+            "released": {
+                "type": "boolean",
+                "description": "No sweep under the results root holds cluster resources",
+            },
+            "message": {"type": "string"},
+            "error": {"type": "string"},
+        },
+        "additionalProperties": True,
+        "description": "release_storage_test: release the sweeps the run step did not collect",
     },
 }
 
