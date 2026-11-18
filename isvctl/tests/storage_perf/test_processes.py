@@ -93,12 +93,21 @@ def real_checkout(tmp_path: Path, mode: str) -> Path:
 
 
 def alive(pid: int) -> bool:
-    """True while process *pid* exists."""
+    """True while process *pid* exists and has not exited.
+
+    A killed process stays a zombie until its parent reaps it. A container's PID 1 (CI runs the
+    tests under ``tail -f /dev/null``) may never reap the orphans it inherits, so on Linux a
+    zombie counts as gone.
+    """
     try:
         os.kill(pid, 0)
-        return True
     except ProcessLookupError:
         return False
+    try:
+        # /proc/<pid>/stat is "pid (comm) state ...": the state follows the last ")".
+        return Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[0] != "Z"
+    except OSError:
+        return True  # no /proc (macOS): kill(pid, 0) is the answer
 
 
 def wait_until(condition: Any, seconds: float = 10) -> bool:

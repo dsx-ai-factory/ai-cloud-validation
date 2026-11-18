@@ -283,30 +283,50 @@ def test_release_says_how_to_vendor_a_missing_release(
     assert out["error"] == f"no storage-scale-test at {tmp_path / 'missing'}; {vendor}"
 
 
-def test_release_with_an_unwritable_results_root_gives_json(perf: InProcess, tmp_path: Path) -> None:
+# The two tests below fake the PermissionError the OS raises for a results root without write
+# or list permission, rather than chmod it: root (as in CI containers) ignores directory
+# permissions, so a chmod would not fail there.
+
+
+def test_release_with_an_unwritable_results_root_gives_json(
+    perf: InProcess, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A results root the step cannot lock fails with the reason, as JSON."""
     directory = tmp_path / "results"
     directory.mkdir()
-    directory.chmod(0o500)
-    try:
-        rc, out = perf("release_storage_test", f"--results-dir={directory}")
-    finally:
-        directory.chmod(0o700)
+    lock = directory / SST.RUN_LOCK
+    real_open = os.open
+
+    def open_denied(path: Any, *args: Any, **kwargs: Any) -> int:
+        """Refuse to create the run lock, as an unwritable directory would."""
+        if Path(path) == lock:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_denied)
+    rc, out = perf("release_storage_test", f"--results-dir={directory}")
 
     assert rc == 1 and out["released"] is False
     assert out["error"].startswith(f"cannot lock {directory}: ")
     assert_schema("release_storage_test", out)
 
 
-def test_release_with_an_unlistable_results_root_is_not_released(perf: InProcess, launcher: FakeLauncher) -> None:
+def test_release_with_an_unlistable_results_root_is_not_released(
+    perf: InProcess, launcher: FakeLauncher, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A results root the step can lock but not list fails; it never reads as nothing held."""
     directory = launcher.base / "results"
     directory.mkdir(exist_ok=True)
-    directory.chmod(0o300)
-    try:
-        rc, out = perf("release_storage_test", f"--results-dir={directory}", f"--scale-test-base={launcher.base}")
-    finally:
-        directory.chmod(0o700)
+    real_iterdir = Path.iterdir
+
+    def iterdir_denied(self: Path) -> Any:
+        """Refuse to list the results root, as a directory without read permission would."""
+        if self == directory:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir_denied)
+    rc, out = perf("release_storage_test", f"--results-dir={directory}", f"--scale-test-base={launcher.base}")
 
     assert rc == 1 and out["released"] is False
     assert "Permission denied" in out["error"]
