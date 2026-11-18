@@ -1218,7 +1218,7 @@ mappings:
       - req_id: HSS02
         source: offtake
         coverage: partial
-    annotations: 'Storage performance sweep (storage-scale-test), one test with a subtest per stage: the sweep across the selected nodes completed, complete measured write and read results, and the slower operation''s best bandwidth and IOPS against perf_min_mbps and perf_min_iops (a floor of 0 is skipped, with the measured numbers, not passed). Does not provision or assert a QoS class (HSS02-01 covers provider QoS limits).'
+    annotations: 'Storage performance sweep (storage-scale-test), one test with a subtest per stage: the sweep across the selected nodes completed, complete measured write and read results, and the slower operation''s best bandwidth and IOPS against perf_min_mbps and perf_min_iops (a floor of 0 only reports the measured numbers). Does not provision or assert a QoS class (HSS02-01 covers provider QoS limits).'
     notes: ''
   - test_id: HSS03-01
     requirements:

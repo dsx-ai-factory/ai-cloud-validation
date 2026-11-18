@@ -201,6 +201,8 @@ def test_a_sweep_that_outlives_the_wait_is_cancelled_and_collected(perf: InProce
     rc, out = run_step(perf, launcher.base, "--wait-timeout", "60")
 
     assert rc == 1 and out["state"] == "TIMEOUT" and out["resources_released"] is True
+    # The counts are collect's final view, not the last RUNNING poll (0 succeeded).
+    assert out["executions"] == {"total": 2, "succeeded": 2, "failed": 0}
     assert_cancelled_before_collect(launcher)
     assert_schema("run_storage_test", out)
 

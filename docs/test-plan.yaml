@@ -3182,7 +3182,7 @@ domains:
                   - storage
                 priority: P1
                 milestone: ""
-                notes: "Partial HSS02 coverage: one test with a subtest per stage - the sweep across the selected nodes completed, complete measured write and read bandwidth, IOPS and latency, and bandwidth and IOPS against configured floors (a floor of 0 is skipped, not passed)."
+                notes: "Partial HSS02 coverage: one test with a subtest per stage - the sweep across the selected nodes completed, complete measured write and read bandwidth, IOPS and latency, and bandwidth and IOPS against configured floors (a floor of 0 only reports the measured numbers)."
                 req_id: HSS02
                 test_id: HSS02-02
                 actor: tenant

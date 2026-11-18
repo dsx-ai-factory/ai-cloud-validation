@@ -180,3 +180,26 @@ def test_parent_pass_message_skips_a_testcase_that_did_not_pass(tmp_path: Path) 
     _inject_pass_messages_into_junit(junit, {"::test_validation[ParentCheck]": "should not appear"})
 
     assert [child.tag for child in _case(junit, "ParentCheck")] == ["skipped"]
+
+
+def test_system_out_drops_characters_xml_does_not_allow(tmp_path: Path) -> None:
+    """An ANSI-coloured message is written without its control characters, so the file still parses."""
+    junit = _parent_junit(tmp_path, "ParentCheck")
+    report = _stub_report("::ParentCheck", "probe", message="\x1b[32mOK\x1b[0m caf\u00e9")
+
+    _inject_subtests_into_junit(junit, cast(list[SubTestReport], [report]))
+    _inject_pass_messages_into_junit(junit, {"::test_validation[ParentCheck]": "\x1b[1mdone\x1b[0m"})
+
+    assert _case(junit, "ParentCheck::probe").findtext("system-out") == "[32mOK[0m caf\u00e9"
+    assert _case(junit, "ParentCheck").findtext("system-out") == "[1mdone[0m"
+
+
+def test_parent_pass_message_keeps_a_parameter_id_with_double_colons(tmp_path: Path) -> None:
+    """A variant name containing "::" still matches its normalized testcase."""
+    junit = _parent_junit(tmp_path, "K8sNodeCountCheck-rw::4k")
+
+    _inject_pass_messages_into_junit(
+        junit, {"tests/test_validations.py::test_validation[K8sNodeCountCheck-rw::4k]": "4 nodes"}
+    )
+
+    assert _case(junit, "K8sNodeCountCheck-rw::4k").findtext("system-out") == "4 nodes"

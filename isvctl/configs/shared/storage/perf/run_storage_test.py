@@ -320,9 +320,13 @@ def _run_locked(
             return
     collected = sst.collect(base, sweep_dir, env, progress=progress)
     result["resources_released"] = collected["resources_released"]
-    # The status that confirmed collect is the final view; asking again adds nothing.
-    if finished and collected.get("final_status"):
+    # The status that confirmed collect is the final view; asking again adds nothing. After a
+    # TIMEOUT it has the counts of what finished before the cancel, and TIMEOUT stays the state.
+    if collected.get("final_status"):
+        state = result.get("state")
         _finish(result, collected["final_status"])
+        if not finished:
+            result["state"] = state
     result["success"] = finished and result.get("state") == TERMINAL_OK and collected["resources_released"]
     if not result["success"]:
         ended = "was cancelled outside this run" if cancelled_outside else f"ended {result.get('state')}"

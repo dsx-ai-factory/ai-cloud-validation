@@ -279,6 +279,10 @@ def _results_error(document: dict[str, Any] | None, best: dict[str, Any], report
     missing = [op for op in OPERATIONS if op not in best or best[op]["best_mbps"] <= 0]
     if missing:
         return f"no {' or '.join(missing)} results in {RESULTS_JSON}"
+    # A null or non-finite IOPS reads as 0 (_number), so it is no measurement either.
+    no_iops = [op for op in OPERATIONS if best[op]["best_iops"] <= 0]
+    if no_iops:
+        return f"no {' or '.join(no_iops)} IOPS in {RESULTS_JSON}"
     return None
 
 

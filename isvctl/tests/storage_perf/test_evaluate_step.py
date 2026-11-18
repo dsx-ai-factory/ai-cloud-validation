@@ -174,6 +174,17 @@ def test_evaluate_treats_non_finite_rates_as_invalid() -> None:
     json.loads(json.dumps(out), parse_constant=lambda name: pytest.fail(f"non-standard JSON constant {name}"))
 
 
+@pytest.mark.parametrize("ops", ["NaN", "inf", None], ids=["nan", "inf", "null"])
+def test_evaluate_fails_a_bandwidth_without_a_real_iops(ops: Any) -> None:
+    """A real bandwidth with a non-finite or missing IOPS is no IOPS measurement: results_present fails."""
+    doc = document()
+    doc["executions"][0]["results"]["phases"][0]["elbencho_first"] = {"bytes_per_s": 1e8, "ops_per_s": ops}
+
+    out = EVALUATE._evaluate(RUN_OK, doc, 0.0, 0.0)
+
+    assert out["tests"]["results_present"] == {"passed": False, "error": "no write IOPS in results.json"}
+
+
 # --- Arguments ---
 
 

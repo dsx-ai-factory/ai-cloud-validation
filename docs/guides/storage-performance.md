@@ -75,7 +75,7 @@ sweep was released, which happens in teardown, a later phase.
 
 | Check | Test ID | Step | Passes when |
 |---|---|---|---|
-| `StoragePerfSweepCheck` | `HSS02-02` | `evaluate_storage_test` | All four subtests pass: `sweep_completed` (the run step finished the sweep with state `SUCCESS`), `results_present` (`batch_outcome.complete` is true, with write and read numbers), `bandwidth_meets_min` (`perf_min_mbps`) and `iops_meets_min` (`perf_min_iops`). A floor of `0` skips its subtest, and so the test, rather than passing it |
+| `StoragePerfSweepCheck` | `HSS02-02` | `evaluate_storage_test` | All four subtests pass: `sweep_completed` (the run step finished the sweep with state `SUCCESS`), `results_present` (`batch_outcome.complete` is true, with write and read numbers), `bandwidth_meets_min` (`perf_min_mbps`) and `iops_meets_min` (`perf_min_iops`). A floor of `0` is no floor: that subtest passes and only reports the measured numbers |
 | `StoragePerfSweepReleasedCheck` | `N/A` (teardown) | `release_storage_test` | No sweep still holds cluster resources |
 
 Each subtest carries `evaluate_storage_test`'s message for it, with the measured

@@ -461,13 +461,21 @@ _PARAMETRIZED_NAME_RE = re.compile(r"^\w+\[(.+)]$")
 
 def _testcase_name(nodeid: str) -> str:
     """The JUnit testcase name of *nodeid* once normalized (``test_validation[X]`` -> ``X``)."""
-    raw = nodeid.split("::")[-1]
+    # Split the path on "::" only before the parameter id, which may itself contain "::".
+    head, bracket, params = nodeid.partition("[")
+    raw = head.split("::")[-1] + bracket + params
     m = _PARAMETRIZED_NAME_RE.match(raw)
     return m.group(1) if m else raw
 
 
+# Characters XML 1.0 does not allow (control characters such as ANSI escapes); ElementTree
+# writes them as they are, which would leave a file no parser reads.
+_XML_INVALID_RE = re.compile("[^\u0009\u000a\u000d\u0020-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+
+
 def _add_system_out(testcase: ET.Element, text: str) -> None:
     """Put *text* in the testcase's ``<system-out>``, ahead of any output already there."""
+    text = _XML_INVALID_RE.sub("", text)
     system_out = testcase.find("system-out")
     if system_out is None:
         system_out = ET.SubElement(testcase, "system-out")
