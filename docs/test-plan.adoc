@@ -3451,7 +3451,7 @@ a| https://github.com/dsx-ai-factory/ai-cloud-validation/issues/504[#504]
 |
 | kubernetes, offtake, performance, storage
 | tenant
-| Partial HSS02 coverage: one test with a subtest per stage - the sweep across the selected nodes completed, complete measured write and read bandwidth, IOPS and latency, and bandwidth and IOPS against configured floors (a floor of 0 only reports the measured numbers).
+| Partial HSS02 coverage: one test with a subtest per stage - the sweep across the selected nodes completed, complete measured write and read bandwidth and IOPS (latency is reported, not checked), and bandwidth and IOPS against configured floors (a floor of 0 only reports the measured numbers).
 | P1
 a|
 |

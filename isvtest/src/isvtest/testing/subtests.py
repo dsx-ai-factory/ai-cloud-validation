@@ -461,8 +461,9 @@ _PARAMETRIZED_NAME_RE = re.compile(r"^\w+\[(.+)]$")
 
 def _testcase_name(nodeid: str) -> str:
     """The JUnit testcase name of *nodeid* once normalized (``test_validation[X]`` -> ``X``)."""
-    # Split the path on "::" only before the parameter id, which may itself contain "::".
-    head, bracket, params = nodeid.partition("[")
+    # The file path ends at the first "::" and may contain "["; the parameter id may contain "::".
+    test = nodeid.partition("::")[2] if "::" in nodeid else nodeid
+    head, bracket, params = test.partition("[")
     raw = head.split("::")[-1] + bracket + params
     m = _PARAMETRIZED_NAME_RE.match(raw)
     return m.group(1) if m else raw

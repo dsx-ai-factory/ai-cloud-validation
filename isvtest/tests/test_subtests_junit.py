@@ -203,3 +203,14 @@ def test_parent_pass_message_keeps_a_parameter_id_with_double_colons(tmp_path: P
     )
 
     assert _case(junit, "K8sNodeCountCheck-rw::4k").findtext("system-out") == "4 nodes"
+
+
+def test_parent_pass_message_ignores_brackets_in_the_file_path(tmp_path: Path) -> None:
+    """A "[" in a directory name is not the parameter id: the message still finds its testcase."""
+    junit = _parent_junit(tmp_path, "StoragePerfSweepCheck")
+
+    _inject_pass_messages_into_junit(
+        junit, {"tests/[gpu]/test_validations.py::test_validation[StoragePerfSweepCheck]": "Sweep completed"}
+    )
+
+    assert _case(junit, "StoragePerfSweepCheck").findtext("system-out") == "Sweep completed"
