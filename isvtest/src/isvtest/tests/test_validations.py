@@ -267,6 +267,9 @@ def test_validation(
         )
         raise
 
+    if result["passed"] and result["output"]:
+        subtests.record_pass_message(result["output"])
+
     outcomes = {"passed": 0, "failed": 0, "skipped": 0}
     for subtest in result.get("subtests", []):
         outcomes["skipped" if subtest.get("skipped") else "passed" if subtest.get("passed") else "failed"] += 1

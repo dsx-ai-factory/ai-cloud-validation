@@ -1808,7 +1808,6 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
                 ),
             },
             "resources_released": {"type": ["boolean", "null"], "description": "null when nothing was submitted"},
-            "scale_test_version": {"type": "string", "description": "storage-scale-test's version"},
             "results_dir": {"type": "string", "description": "The sweep directory (elbencho-*) under the results root"},
             "executions": {
                 "type": "object",
@@ -1818,10 +1817,10 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
                     "failed": {"type": "integer", "minimum": 0},
                 },
             },
-            "error": {"type": "string"},
-            "collect_error": {"type": "string"},
-            "failed_execution": {"type": "string"},
-            "failed_log": {"type": "string"},
+            "error": {
+                "type": "string",
+                "description": "Why it failed, with the first failed execution and how to release a held sweep",
+            },
             "progress_log": {
                 "type": "string",
                 "description": "The run's progress log: one line per estimate, submit, status check, cancel and collect",
@@ -1841,7 +1840,6 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             **COMMON_PROPERTIES,
             "test_name": {"const": "evaluate_storage_test"},
-            "results_dir": {"type": ["string", "null"], "description": "The sweep directory it evaluated"},
             "headline": {
                 "type": "object",
                 "additionalProperties": {
@@ -1860,7 +1858,11 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
                 "additionalProperties": {
                     "type": "object",
                     "required": ["passed"],
-                    "properties": {"passed": {"type": "boolean"}},
+                    "properties": {
+                        "passed": {"type": "boolean"},
+                        "message": {"type": "string"},
+                        "error": {"type": "string"},
+                    },
                 },
             },
         },

@@ -51,14 +51,13 @@ Output JSON:
     "platform": "storage",
     "test_name": "run_storage_test",
     "state": "SUCCESS",
-    "scale_test_version": "v2.1.0",
     "results_dir": "/path/to/results/elbencho-20260101Z000000",
     "executions": {"total": 4, "succeeded": 4, "failed": 0},
     "resources_released": true,
     "progress_log": "/path/to/results/run-logs/run-20260101T000000Z-1234.log"
 }
-A failed run adds "error", and "collect_error", "failed_execution" and "failed_log" when they
-apply.
+A failed run adds "error": why it failed, then, when they apply, the first failed execution
+and its log, and what to run to release a sweep that still holds cluster resources.
 """
 
 from __future__ import annotations
@@ -170,7 +169,6 @@ def _demo_result() -> dict[str, Any]:
         "platform": "storage",
         "test_name": "run_storage_test",
         "state": TERMINAL_OK,
-        "scale_test_version": "demo",
         "results_dir": "/tmp/isvctl-demo/elbencho-demo",
         "executions": {"total": 2, "succeeded": 2, "failed": 0},
         "resources_released": True,
@@ -261,7 +259,6 @@ def _run_sweep(args: argparse.Namespace, result: dict[str, Any], progress: sst.P
     if not (base / sst.LAUNCHER).is_file():
         result["error"] = sst.missing_tree(base)
         return
-    result["scale_test_version"] = sst.scale_test_version(base)
     # Held until the step ends: a teardown never acts on a sweep this step is still running.
     lock = sst.run_lock(args.results_dir)
     if lock is None:
@@ -318,21 +315,29 @@ def _run_locked(
         if stopped is None:
             # The teardown step cancels and collects it again.
             result["resources_released"] = False
-            result["collect_error"] = sst.cancel_failed(base, sweep_dir)
-            result.setdefault("error", f"sweep was cancelled outside this run; see {sweep_dir}")
+            reason = result.get("error") or f"sweep was cancelled outside this run; see {sweep_dir}"
+            result["error"] = f"{reason}; {sst.cancel_failed(base, sweep_dir)}"
             return
     collected = sst.collect(base, sweep_dir, env, progress=progress)
     result["resources_released"] = collected["resources_released"]
-    for key in ("failed_execution", "failed_log", "collect_error"):
-        if key in collected:
-            result[key] = collected[key]
     # The status that confirmed collect is the final view; asking again adds nothing.
     if finished and collected.get("final_status"):
         _finish(result, collected["final_status"])
     result["success"] = finished and result.get("state") == TERMINAL_OK and collected["resources_released"]
-    if not result["success"] and "error" not in result:
+    if not result["success"]:
         ended = "was cancelled outside this run" if cancelled_outside else f"ended {result.get('state')}"
-        result["error"] = f"sweep {ended}; see {sweep_dir}"
+        reason = result.get("error") or f"sweep {ended}; see {sweep_dir}"
+        result["error"] = "; ".join([reason, *_collect_details(collected)])
+
+
+def _collect_details(collected: dict[str, Any]) -> list[str]:
+    """What collect said about a failed sweep: its first failed execution, and how to release it."""
+    details = []
+    if "failed_execution" in collected:
+        details.append(f"first failed execution {collected['failed_execution']}, log {collected.get('failed_log')}")
+    if "collect_error" in collected:
+        details.append(collected["collect_error"])
+    return details
 
 
 def main(argv: list[str] | None = None) -> int:

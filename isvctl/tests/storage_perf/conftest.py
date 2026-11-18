@@ -148,7 +148,7 @@ def real_sst_run(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class FakeLauncher:
-    """Stands in for sst.run: this checkout's launcher (including ``--version``) and extractor.
+    """Stands in for sst.run: this checkout's launcher and extractor.
 
     The launcher plays back one sweep:
 
@@ -177,7 +177,6 @@ class FakeLauncher:
         self.calls: list[str] = []
         self.envs: list[dict[str, str]] = []
         self.sweep_dirs: list[Path] = []
-        self.version: str | None = None
         self.extractor: Any = None
         self._start_sweep()
 
@@ -200,8 +199,6 @@ class FakeLauncher:
 
     def __call__(self, cmd: list[str], timeout: float, env: dict[str, str] | None = None) -> Any:
         """Answer one sst.run call."""
-        if cmd == [str(self.base / SST.LAUNCHER), "--version"]:
-            return ran(stdout=f"{self.version}\n") if self.version else ran(127)
         if cmd[0] == str(self.base / SST.LAUNCHER):
             self.calls.append(" ".join(cmd[1:]))
             self.envs.append(env or {})

@@ -1596,15 +1596,6 @@ docs/requirements/test-requirements-matrix.yaml. Run `make plan` to regenerate.
 | partial
 |
 
-| HSS02-02
-| Data Services
-| Storage Performance
-| Verify a storage-scale-test IO sweep completes with complete write and read results that meet the configured floors
-| HSS07
-| offtake
-| partial
-|
-
 | [[HSS03-01]]HSS03-01
 | Data Services
 | SDS Controller
@@ -2151,15 +2142,6 @@ docs/requirements/test-requirements-matrix.yaml. Run `make plan` to regenerate.
 | Verify large-directory listing of 1,000,000 files and 500,000 subdirectories without error or truncation
 | N-013b
 | storage
-| partial
-|
-
-| [[HSS07-04]]HSS07-04
-| Data Services
-| Storage Performance
-| Verify the sweep releases every cluster resource it held
-| HSS07
-| offtake
 | partial
 |
 

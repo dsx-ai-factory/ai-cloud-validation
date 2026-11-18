@@ -2687,7 +2687,7 @@ a| https://github.com/dsx-ai-factory/ai-cloud-validation/issues/215[#215]
 | pending
 |
 
-.59+| Data Services
+.58+| Data Services
 .34+| SDS Controller
 .19+| Manages software-defined storage services and policies. Orchestrates provisioning, tiers, and resiliency.
 .19+| AWS: EBS + FSx backend control planes
@@ -3443,36 +3443,21 @@ a| https://github.com/dsx-ai-factory/ai-cloud-validation/issues/504[#504]
 | published
 |
 
-.2+| Storage Performance
-.2+| IO benchmark sweep (storage-scale-test) against an existing provider claim, reporting real bandwidth, IOPS and latency
-.2+| storage-scale-test elbencho sweep on Kubernetes
+| Storage Performance
+| IO benchmark sweep (storage-scale-test) against an existing provider claim, reporting real bandwidth, IOPS and latency
+| storage-scale-test elbencho sweep on Kubernetes
 | [[HSS02-02]]HSS02-02
 | HSS02
 |
 | kubernetes, offtake, performance, storage
 | tenant
-| Partial HSS02 and HSS07 coverage: one test with a subtest per stage - the sweep across the selected nodes completed, complete measured write and read bandwidth, IOPS and latency, and bandwidth and IOPS against configured floors (0 = report only).
+| Partial HSS02 coverage: one test with a subtest per stage - the sweep across the selected nodes completed, complete measured write and read bandwidth, IOPS and latency, and bandwidth and IOPS against configured floors (a floor of 0 is skipped, not passed).
 | P1
 a|
 |
 |
 |
 | Verify a storage-scale-test IO sweep completes with complete write and read results that meet the configured floors
-| pending
-|
-
-| [[HSS07-04]]HSS07-04
-| HSS07
-|
-| kubernetes, offtake, performance, storage
-| tenant
-| Partial HSS07 coverage: the sweep releases every cluster resource it held.
-| P1
-a|
-|
-|
-|
-| Verify the sweep releases every cluster resource it held
 | pending
 |
 

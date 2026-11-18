@@ -96,7 +96,9 @@ def test_collect_passes_on_where_the_failed_cells_are(
 
     _, out = run_step(perf, launcher.base)
 
-    assert (out["failed_execution"], out["failed_log"]) == ("0002", "/r/logs/0002 write.log")
+    assert out["error"] == (
+        f"sweep ended FAILED; see {out['results_dir']}; first failed execution 0002, log /r/logs/0002 write.log"
+    )
 
 
 def test_run_does_not_collect_a_rolled_back_submission(perf: InProcess, launcher: FakeLauncher) -> None:
@@ -228,8 +230,11 @@ def test_a_cancel_that_does_not_stop_the_sweep_skips_collect(perf: InProcess, la
     assert "--collect" not in launcher.operations()
     assert launcher.operations().count("--cancel") == SST.CANCEL_ATTEMPTS
     path, sweep_dir = launcher.base / SST.LAUNCHER, out["results_dir"]
-    assert out["collect_error"] == SST.cancel_failed(launcher.base, sweep_dir)
-    assert out["collect_error"].index(f"`{path} --collect {sweep_dir}`") > out["collect_error"].index("--cancel")
+    assert (
+        out["error"]
+        == f"sweep did not finish within 60s (--wait-timeout 60); {SST.cancel_failed(launcher.base, sweep_dir)}"
+    )
+    assert out["error"].index(f"`{path} --collect {sweep_dir}`") > out["error"].index("--cancel")
 
 
 @pytest.mark.parametrize(
@@ -247,7 +252,7 @@ def test_a_cancel_made_outside_the_run_is_finished_here(
     rc, out = run_step(perf, launcher.base)
 
     assert rc == 1 and out["resources_released"] is released
-    assert out["error"] == f"{error}; see {out['results_dir']}"
+    assert out["error"].startswith(f"{error}; see {out['results_dir']}")
     assert ("--collect" in launcher.operations()) is released
 
 
@@ -284,7 +289,8 @@ def test_collect_reports_cleanup_that_never_finishes(perf: InProcess, launcher: 
     rc, out = run_step(perf, launcher.base)
 
     assert rc == 1 and out["resources_released"] is False
-    assert out["collect_error"] == (
+    assert out["error"] == (
+        f"sweep ended SUCCESS; see {out['results_dir']}; "
         "the sweep still holds cluster resources (RESULT_COLLECTION=CLEANUP_PENDING); "
         f"run `{launcher.base / SST.LAUNCHER} --collect {out['results_dir']}` to release them"
     )
@@ -420,19 +426,18 @@ def test_auto_wait_sizes_the_deadline_from_the_sweep(perf: InProcess, launcher: 
 
 
 @pytest.mark.parametrize("how", ["flag", "env"])
-def test_run_uses_an_explicit_tree_and_reports_its_version(
+def test_run_uses_an_explicit_tree(
     how: str, perf: InProcess, launcher: FakeLauncher, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--scale-test-base, or STORAGE_SCALE_TEST_BASE, picks the tree; the launcher's --version names it."""
+    """--scale-test-base, or STORAGE_SCALE_TEST_BASE, picks the tree (the fake answers only for its own)."""
     checkout = launcher.base
-    launcher.version = "v9.9.9-modified"
     monkeypatch.setenv("STORAGE_SCALE_TEST_BASE", str(checkout) if how == "env" else "/not/this/one")
     tree = [f"--scale-test-base={checkout}"] if how == "flag" else []
 
     rc, out = perf("run_storage_test", *tree, "--claim=a/b", "--node-selector=a=b", f"--results-dir={checkout}/r")
 
     assert rc == 0, out
-    assert out["scale_test_version"] == "v9.9.9-modified"
+    assert launcher.operations()[0] == "submit"
 
 
 def test_run_says_how_to_vendor_a_missing_release(
@@ -579,7 +584,7 @@ def test_the_run_lock_is_held_for_every_launcher_call(
 
     def run(cmd: list[str], timeout: float, env: dict[str, str] | None = None) -> Any:
         """Record whether the run lock is free at each launcher call, then let FakeLauncher answer it."""
-        if cmd[0] == str(launcher.base / SST.LAUNCHER) and cmd[1:] != ["--version"]:
+        if cmd[0] == str(launcher.base / SST.LAUNCHER):
             free.append(lock_is_free(lock))
         return launcher(cmd, timeout, env)
 

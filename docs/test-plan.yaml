@@ -3182,22 +3182,9 @@ domains:
                   - storage
                 priority: P1
                 milestone: ""
-                notes: "Partial HSS02 and HSS07 coverage: one test with a subtest per stage - the sweep across the selected nodes completed, complete measured write and read bandwidth, IOPS and latency, and bandwidth and IOPS against configured floors (0 = report only)."
+                notes: "Partial HSS02 coverage: one test with a subtest per stage - the sweep across the selected nodes completed, complete measured write and read bandwidth, IOPS and latency, and bandwidth and IOPS against configured floors (a floor of 0 is skipped, not passed)."
                 req_id: HSS02
                 test_id: HSS02-02
-                actor: tenant
-                status: pending
-              - summary: Verify the sweep releases every cluster resource it held
-                labels:
-                  - kubernetes
-                  - offtake
-                  - performance
-                  - storage
-                priority: P1
-                milestone: ""
-                notes: "Partial HSS07 coverage: the sweep releases every cluster resource it held."
-                req_id: HSS07
-                test_id: HSS07-04
                 actor: tenant
                 status: pending
       - name: Object Storage Service

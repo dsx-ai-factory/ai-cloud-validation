@@ -39,15 +39,25 @@ from .conftest import (
 # --- Judging a document ---
 
 
-def test_evaluate_reports_numbers_without_a_floor() -> None:
-    """With floors of 0 a complete sweep passes and reports the slower operation."""
+def test_evaluate_reports_a_floor_of_zero_with_the_numbers() -> None:
+    """A floor of 0 is no floor: its test passes and says what was measured."""
     out = EVALUATE._evaluate(RUN_OK, document(), 0.0, 0.0)
 
     assert out["success"] is True
     assert out["headline"]["write"]["best_mbps"] == 104.9
     assert out["headline"]["read"]["min_avg_latency_ms"] == 4.0
-    assert out["tests"]["bandwidth_meets_min"]["measured_mbps"] == 104.9
-    assert out["tests"]["iops_meets_min"]["message"] == "report only (no floor set)"
+    assert out["tests"]["results_present"] == {
+        "passed": True,
+        "message": "1 execution complete: write 104.9 MB/s, 200.0 IOPS, 5.0 ms avg latency; "
+        "read 157.3 MB/s, 300.0 IOPS, 4.0 ms avg latency",
+    }
+    assert out["tests"]["bandwidth_meets_min"] == {
+        "passed": True,
+        "message": "no floor set (perf_min_mbps); 104.9 MB/s measured (write 104.9 MB/s, read 157.3 MB/s)",
+    }
+    assert out["tests"]["iops_meets_min"]["message"] == (
+        "no floor set (perf_min_iops); 200.0 IOPS measured (write 200.0 IOPS, read 300.0 IOPS)"
+    )
     assert_schema("evaluate_storage_test", out)
 
 
@@ -73,11 +83,14 @@ def test_evaluate_reports_whether_the_run_completed_the_sweep(run: dict[str, Any
 
 def test_evaluate_enforces_a_configured_floor() -> None:
     """A floor above the slower operation fails the bandwidth test only."""
-    out = EVALUATE._evaluate(RUN_OK, document(), 120.0, 0.0)
+    out = EVALUATE._evaluate(RUN_OK, document(), 120.0, 150.0)
 
     assert out["success"] is False
-    assert out["tests"]["bandwidth_meets_min"]["error"] == "104.9 MB/s < floor 120.0 MB/s"
-    assert out["tests"]["iops_meets_min"]["passed"] is True
+    assert out["tests"]["bandwidth_meets_min"] == {"passed": False, "error": "104.9 MB/s < floor 120.0 MB/s"}
+    assert out["tests"]["iops_meets_min"] == {
+        "passed": True,
+        "message": "200.0 IOPS >= floor 150.0 IOPS (write 200.0 IOPS, read 300.0 IOPS)",
+    }
 
 
 def test_evaluate_compares_floors_before_rounding() -> None:
@@ -92,7 +105,7 @@ def test_evaluate_compares_floors_before_rounding() -> None:
 
     assert out["headline"]["write"]["best_mbps"] == 100.0 and out["headline"]["write"]["best_iops"] == 100.0
     assert out["tests"]["bandwidth_meets_min"]["error"] == "99.96 MB/s < floor 100.0 MB/s"
-    assert out["tests"]["iops_meets_min"]["message"] == "100.04 IOPS >= floor 100.01 IOPS"
+    assert out["tests"]["iops_meets_min"]["message"].startswith("100.04 IOPS >= floor 100.01 IOPS (")
 
 
 def test_evaluate_counts_a_rate_that_rounds_to_zero_as_a_result() -> None:
@@ -146,7 +159,7 @@ def test_evaluate_fails_when_an_operation_has_no_results() -> None:
 
     out = EVALUATE._evaluate(RUN_OK, doc, 0.0, 0.0)
 
-    assert out["tests"]["results_present"]["passed"] is False
+    assert out["tests"]["results_present"] == {"passed": False, "error": "no read results in results.json"}
     assert out["tests"]["bandwidth_meets_min"]["passed"] is False
 
 
@@ -165,7 +178,7 @@ def test_evaluate_treats_non_finite_rates_as_invalid() -> None:
 
 
 def test_an_empty_floor_means_no_floor() -> None:
-    """An empty perf_min_mbps or perf_min_iops reports only, like 0."""
+    """An empty perf_min_mbps or perf_min_iops means no floor, like 0."""
     args = EVALUATE._parse_args(["--scale-test-base=/x", "--min-mbps=", "--min-iops="])
 
     assert (args.min_mbps, args.min_iops) == (0.0, 0.0)

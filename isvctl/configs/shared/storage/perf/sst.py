@@ -403,17 +403,6 @@ def missing_tree(base: Path) -> str:
     return f"no storage-scale-test at {base}{hint}"
 
 
-def scale_test_version(base: Path) -> str:
-    """The tree's version, from the launcher's own ``--version``.
-
-    A release source archive that fails its SOURCE_SHA256 check reads ``<version>-modified``;
-    a Git checkout reads like ``v2.1.0-4-g<sha>``.
-    """
-    proc = run([str(base / LAUNCHER), "--version"], 60)
-    lines = proc.stdout.strip().splitlines()
-    return lines[-1] if proc.returncode == 0 and lines else "unknown"
-
-
 def lifecycle(
     base: Path, operation: str, sweep_dir: str, env: dict[str, str], *, timeout_s: float, lock_window_s: float
 ) -> Ran:

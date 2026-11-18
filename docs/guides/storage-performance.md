@@ -8,8 +8,9 @@ reported real write and read numbers. The benchmark is
 Kubernetes); the shared steps in `isvctl/configs/shared/storage/perf/` drive it,
 so a provider only names the claim and the nodes to use.
 
-There is no official performance bar. A pass means the sweep ran and reported
-numbers; a provider can set its own floors (see [Floors](#floors)).
+There is no official performance bar: a provider sets its own floors (see
+[Floors](#floors)). A pass means the sweep ran, reported numbers and met them; with no
+floors set it only reports the measured numbers.
 
 ## Running it
 
@@ -69,26 +70,28 @@ sweep from submit to release.
 | teardown | `release_storage_test` | Releases every sweep under the results root that still holds cluster resources |
 | teardown | `teardown_cluster` | Provider: removes what setup created (nothing, as shipped) |
 
-Two tests: one for the sweep, with a subtest per stage, and one for releasing it, which
-happens in teardown, a later phase.
+Two checks: the sweep test, with a subtest per stage, and a teardown check that the
+sweep was released, which happens in teardown, a later phase.
 
 | Check | Test ID | Step | Passes when |
 |---|---|---|---|
-| `StoragePerfSweepCheck` | `HSS02-02` | `evaluate_storage_test` | All four subtests pass: `sweep_completed` (the run step finished the sweep with state `SUCCESS`), `results_present` (`batch_outcome.complete` is true, with write and read numbers), `bandwidth_meets_min` (`perf_min_mbps`) and `iops_meets_min` (`perf_min_iops`) |
-| `StoragePerfSweepReleasedCheck` | `HSS07-04` | `release_storage_test` | No sweep still holds cluster resources |
+| `StoragePerfSweepCheck` | `HSS02-02` | `evaluate_storage_test` | All four subtests pass: `sweep_completed` (the run step finished the sweep with state `SUCCESS`), `results_present` (`batch_outcome.complete` is true, with write and read numbers), `bandwidth_meets_min` (`perf_min_mbps`) and `iops_meets_min` (`perf_min_iops`). A floor of `0` skips its subtest, and so the test, rather than passing it |
+| `StoragePerfSweepReleasedCheck` | `N/A` (teardown) | `release_storage_test` | No sweep still holds cluster resources |
 
-The sweep test is a class (`isvtest/src/isvtest/validations/storage_perf.py`), so each
-subtest carries the measured numbers: for example `bandwidth_meets_min: 7123.0 MB/s
-(report only, no floor set); write 7123.0 MB/s, read 7628.4 MB/s`, or, below a floor,
-`7123.0 MB/s < floor 100000.0 MB/s`. On a pass, isvctl's run summary shows only
-`4 subtests passed` (the JUnit report lists the four subtests, without messages); the
-numbers are in the sweep directory's `report.txt` and `results.json`. On a failure the
-summary names the failed subtests and why.
+Each subtest carries `evaluate_storage_test`'s message for it, with the measured
+numbers: for example `bandwidth_meets_min: 7123.0 MB/s >= floor 5000.0 MB/s (write
+7123.0 MB/s, read 7628.4 MB/s)`, or, below a floor, `7123.0 MB/s < floor 100000.0 MB/s`.
+With no floor the subtest passes and only reports the numbers: `no floor set
+(perf_min_mbps); 7123.0 MB/s measured (write 7123.0 MB/s, read 7628.4 MB/s)`. The
+check's own message repeats the headline (`Sweep completed; 2 executions complete:
+write ... MB/s, ... IOPS, ... ms avg latency; read ...`). The full numbers are in the
+sweep directory's `report.txt` and `results.json`. On a failure the summary names the
+failed subtests and why.
 
-The test IDs, defined in `docs/test-plan.yaml`, map to the High-Speed Storage
-requirements HSS02 (performance: bandwidth and IOPS) and HSS07 (parallel filesystem at
-scale) in [Requirements for AI Clouds](../references/requirements-for-ai-clouds-v2.4.md#high-speed-storage-service-requirements);
-each covers part of its requirement.
+`HSS02-02`, defined in `docs/test-plan.yaml`, covers part of the High-Speed Storage
+requirement HSS02 (performance: bandwidth and IOPS) in
+[Requirements for AI Clouds](../references/requirements-for-ai-clouds-v2.4.md#high-speed-storage-service-requirements).
+The release check is cleanup, not a requirement.
 
 A step that exits 0 has its JSON output validated against a schema in
 `isvctl/src/isvctl/config/output_schemas.py` (`storage_perf_run`, `_evaluate`,
@@ -127,7 +130,7 @@ variable.
 | `perf_duration_s` | `10` | Seconds per write and read phase |
 | `perf_wait_timeout_s` | `auto` | How long `run_storage_test` waits for the sweep: `auto` or seconds, at most 12 h; see [Time limits](#time-limits) |
 | `perf_live_interval_ms` | `1000` | elbencho's live statistics interval; its per-interval CSVs feed storage-scale-test's own reports and are what grows a collect |
-| `perf_min_mbps`, `perf_min_iops` | `0` | Floors; `0` (or empty) reports only |
+| `perf_min_mbps`, `perf_min_iops` | `0` | Floors; `0` (or empty) is no floor: that subtest only reports the measured numbers |
 
 storage-scale-test checks these values itself before it touches the cluster; a bad
 one is rejected (`NOT_SUBMITTED`) with its errors, which name its own variables
@@ -149,8 +152,8 @@ has ready-made shapes, starting with its quick validation recipe.
 `evaluate_storage_test` reports a headline per operation: the best bandwidth
 (MB/s, 10^6 bytes) and IOPS across the sweep's cells, and the lowest average
 latency. The floor checks compare the slower operation's best result with
-`perf_min_mbps` and `perf_min_iops`. With a floor of `0` they pass and only report
-the numbers. Set floors from your own expectations for the sweep you configure: a
+`perf_min_mbps` and `perf_min_iops`. A floor of `0` is no floor: that check
+passes and only reports the numbers. Set floors from your own expectations for the sweep you configure: a
 small random IO size gives far higher IOPS and far lower bandwidth than 1M.
 
 ### Time limits
@@ -330,9 +333,8 @@ kubectl get all,leases,networkpolicies -A -l app.kubernetes.io/name=storage-scal
   Job, DaemonSet, Lease or network policies by hand: storage-scale-test journals
   what it creates and expects to remove it itself. For the exceptions, see
   [Releasing a sweep teardown cannot](#releasing-a-sweep-teardown-cannot).
-- The run step's output carries `failed_execution` and `failed_log` for a failed
-  cell, and `collect_error` (with the command to finish the job) when the sweep
-  still holds resources.
+- The run step's `error` names the first failed execution and its log, and, when the
+  sweep still holds resources, the command to release it.
 
 Links to storage-scale-test's docs are to the pinned release
 (`STORAGE_SCALE_TEST_VERSION` in the Makefile). It documents the rest: what

@@ -53,6 +53,7 @@ class SubTestContext:
 
     msg: str | None = attr.ib()
     kwargs: dict[str, Any] = attr.ib(factory=dict)
+    message: str | None = attr.ib(default=None)
 
 
 @attr.s(init=False)
@@ -121,6 +122,14 @@ class SubTests:
     def item(self) -> pytest.Item | pytest.Function:
         """Return the test item."""
         return self._request.node  # type: ignore[return-value]
+
+    def record_pass_message(self, message: str) -> None:
+        """Record the parent test's pass message for its JUnit ``<system-out>``.
+
+        Args:
+            message: What the passing test found (e.g. its measured numbers).
+        """
+        _collected_pass_messages[self.item.nodeid] = message
 
     def test(
         self,
@@ -271,7 +280,7 @@ class _SubTestContextManager:
         ihook = self._request.node.ihook
         report = ihook.pytest_runtest_makereport(item=self._request.node, call=call_info)
         sub_report = SubTestReport._from_test_report(report)
-        sub_report.context = SubTestContext(self._msg, self._kwargs.copy())
+        sub_report.context = SubTestContext(self._msg, self._kwargs.copy(), self._message)
 
         # Handle skipped flag: modify the report outcome directly
         # This avoids calling pytest.skip() which would add markers to the parent test
@@ -413,6 +422,8 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
 
 # Module-level collector for SubTestReports (fallback when stash isn't accessible)
 _collected_subtest_reports: list[SubTestReport] = []
+# Passing parent tests' messages by nodeid, for their JUnit <system-out>
+_collected_pass_messages: dict[str, str] = {}
 
 
 @pytest.hookimpl(trylast=True)
@@ -422,8 +433,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     This post-processes the JUnit XML file to add SubTestReports as individual
     testcase elements, making them visible to CI systems and test reporters.
     """
-    global _collected_subtest_reports
+    global _collected_subtest_reports, _collected_pass_messages
 
+    pass_messages, _collected_pass_messages = _collected_pass_messages, {}
     config = session.config
 
     # Get the JUnit XML path from pytest config
@@ -436,6 +448,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         return  # JUnit file not created yet (shouldn't happen)
 
     _normalize_junit_testcase_names(junit_path)
+    if pass_messages:
+        _inject_pass_messages_into_junit(junit_path, pass_messages)
 
     if _collected_subtest_reports:
         _inject_subtests_into_junit(junit_path, _collected_subtest_reports)
@@ -443,6 +457,41 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
 
 _PARAMETRIZED_NAME_RE = re.compile(r"^\w+\[(.+)]$")
+
+
+def _testcase_name(nodeid: str) -> str:
+    """The JUnit testcase name of *nodeid* once normalized (``test_validation[X]`` -> ``X``)."""
+    raw = nodeid.split("::")[-1]
+    m = _PARAMETRIZED_NAME_RE.match(raw)
+    return m.group(1) if m else raw
+
+
+def _add_system_out(testcase: ET.Element, text: str) -> None:
+    """Put *text* in the testcase's ``<system-out>``, ahead of any output already there."""
+    system_out = testcase.find("system-out")
+    if system_out is None:
+        system_out = ET.SubElement(testcase, "system-out")
+    system_out.text = f"{text}\n{system_out.text}" if system_out.text else text
+
+
+def _inject_pass_messages_into_junit(junit_path: Path, messages: dict[str, str]) -> None:
+    """Add each passing parent test's message to its testcase as ``<system-out>``.
+
+    Args:
+        junit_path: Path to the (name-normalized) JUnit XML file.
+        messages: Pass message by test nodeid.
+    """
+    try:
+        tree = ET.parse(junit_path)
+        by_name = {_testcase_name(nodeid): message for nodeid, message in messages.items()}
+        for testcase in tree.iter("testcase"):
+            message = by_name.get(testcase.get("name", ""))
+            outcome = [child.tag for child in testcase if child.tag in ("failure", "error", "skipped")]
+            if message and not outcome:
+                _add_system_out(testcase, message)
+        tree.write(junit_path, encoding="utf-8", xml_declaration=True)
+    except Exception:
+        pass  # don't break the test run for post-processing failures
 
 
 def _normalize_junit_testcase_names(junit_path: Path) -> None:
@@ -514,9 +563,7 @@ def _inject_subtests_into_junit(junit_path: Path, reports: list[SubTestReport]) 
         insertions: list[tuple[int, list[ET.Element]]] = []
 
         for parent_nodeid, parent_reports in subtests_by_parent.items():
-            raw_parent = parent_nodeid.split("::")[-1] if "::" in parent_nodeid else parent_nodeid
-            m = _PARAMETRIZED_NAME_RE.match(raw_parent)
-            parent_name = m.group(1) if m else raw_parent
+            parent_name = _testcase_name(parent_nodeid)
             parent_idx = testcase_indices.get(parent_name)
 
             if parent_idx is None:
@@ -550,6 +597,8 @@ def _inject_subtests_into_junit(junit_path: Path, reports: list[SubTestReport]) 
                     else:
                         skip_text = f"Subtest {subtest_desc} skipped"
                     skipped_elem.set("message", skip_text)
+                elif report.context.message:
+                    _add_system_out(testcase, report.context.message)
 
                 subtest_elements.append(testcase)
 

@@ -84,7 +84,7 @@ commands:
         # Self-limiting (see the step's docstring); no isvctl timeout.
         timeout: null
 
-      # Reads the sweep's results.json and compares it with the floors; 0 only reports.
+      # Reads the sweep's results.json and compares it with the floors; a floor of 0 only reports.
       - name: evaluate_storage_test
         phase: test
         command: "python ../../../shared/storage/perf/evaluate_storage_test.py"
@@ -143,6 +143,7 @@ tests:
     # elbencho's live statistics interval. Its per-interval CSVs feed storage-scale-test's own
     # reports; they are what grows a collect.
     perf_live_interval_ms: "1000"
-    # Report only. Set to your own expectations to enforce a floor; empty also reports only.
+    # No floor: 0 (or empty) skips that floor's subtest, with the measured numbers. Set to
+    # your own expectations to enforce a floor.
     perf_min_mbps: "0"
     perf_min_iops: "0"

@@ -383,7 +383,7 @@ def test_evaluate_names_an_extractor_it_cannot_run(
     rc, out = evaluate_step(perf, checkout, tmp_path)
 
     assert rc == 1
-    message = out["tests"]["results_present"]["message"]
+    message = out["tests"]["results_present"]["error"]
     assert message.startswith(f"cannot run {extractor}: ")
     assert ("chmod +x" in message) is (problem == "not-executable")
     assert_schema("evaluate_storage_test", out)
