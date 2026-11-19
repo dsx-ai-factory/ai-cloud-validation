@@ -90,7 +90,7 @@ failed subtests and why.
 
 `HSS02-02`, defined in `docs/test-plan.yaml`, covers part of the High-Speed Storage
 requirement HSS02 (performance: bandwidth and IOPS) in
-[Requirements for AI Clouds](../references/requirements-for-ai-clouds-v2.4.md#high-speed-storage-service-requirements).
+[Requirements for AI Clouds](../../../../../docs/references/requirements-for-ai-clouds-v2.4.md#high-speed-storage-service-requirements).
 The release check is cleanup, not a requirement.
 
 A step that exits 0 has its JSON output validated against a schema in

@@ -1804,7 +1804,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
                 "type": "string",
                 "description": (
                     "storage-scale-test's STATE (e.g. SUCCESS, FAILED, CANCELLED, SUBMISSION_FAILED), or the run's "
-                    "own: NOT_SUBMITTED, REFUSED or TIMEOUT (docs/guides/storage-performance.md)"
+                    "own: NOT_SUBMITTED, REFUSED or TIMEOUT (isvctl/configs/shared/storage/perf/README.md)"
                 ),
             },
             "resources_released": {"type": ["boolean", "null"], "description": "null when nothing was submitted"},

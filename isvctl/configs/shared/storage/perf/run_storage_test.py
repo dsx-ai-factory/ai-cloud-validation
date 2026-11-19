@@ -81,7 +81,7 @@ TEST_PATH = "scale-test"
 CLAIM_LEASE_PHASE = "pvc-lease"
 SETTINGS_HINT = (
     "storage-scale-test names its own variables (ELBENCHO_*); the perf_* settings set them "
-    "(see docs/guides/storage-performance.md#settings)"
+    "(see isvctl/configs/shared/storage/perf/README.md#settings)"
 )
 CLAIM_HELD_HINT = (
     "an earlier sweep holds the claim: the teardown step releases it if it is in this results root; rerun after that"

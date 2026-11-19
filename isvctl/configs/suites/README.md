@@ -338,9 +338,9 @@ supplies only `setup_cluster` (as shipped, the generic `scripts/k8s/setup.sh`, w
 inventories the current cluster and creates nothing). `setup_cluster` uses the `generic` schema; every
 other step's output has a `storage_perf_*` schema. Two checks read them:
 `StoragePerfSweepCheck` (HSS02-02) on `evaluate_storage_test`, with a subtest per entry in
-its `tests` (a floor of 0 skips its subtest), and the teardown check
+its `tests` (a floor of 0 only reports), and the teardown check
 `StoragePerfSweepReleasedCheck` (test_id `N/A`) on `release_storage_test`. See
-[Storage Performance](../../../docs/guides/storage-performance.md).
+[Storage Performance](../shared/storage/perf/README.md).
 
 | Step | Phase | Script | Key JSON Fields |
 |------|-------|--------|-----------------|

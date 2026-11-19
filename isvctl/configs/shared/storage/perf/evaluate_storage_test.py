@@ -69,7 +69,7 @@ OPERATIONS = ("write", "read")
 TERMINAL_OK = "SUCCESS"
 RESULTS_JSON = "results.json"
 RESULTS_SCHEMA = "storage-scale-test/filesystem-batch-results"
-# Each floor's unit as shown, and the setting that sets it (docs/guides/storage-performance.md).
+# Each floor's unit as shown, and the setting that sets it (isvctl/configs/shared/storage/perf/README.md).
 FLOORS = {"mbps": ("MB/s", "perf_min_mbps"), "iops": ("IOPS", "perf_min_iops")}
 # The extractor's default limit: EXTRACT_S_PER_CELL per cell of the sweep, at least
 # EXTRACT_FLOOR_S. It takes about 1 s per cell, plus setting up its Python environment the

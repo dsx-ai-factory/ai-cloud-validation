@@ -27,13 +27,12 @@
 #
 # Commands are relative to config/, not this overlay. The sweep runs on an existing claim;
 # the steps are shared (isvctl/configs/shared/storage/perf/). Settings, prerequisites and
-# what to do when a run fails: docs/guides/storage-performance.md
+# what to do when a run fails: isvctl/configs/shared/storage/perf/README.md
 
 version: "1.0"
 
 commands:
   storage:
-    phases: ["setup", "test", "teardown"]
     # Arguments are "--flag", "value" pairs, except "--flag=value" where the value can
     # render empty: isvctl drops an empty argument, which would leave the flag without its
     # value. A setting given an empty value (`--set tests.settings.perf_claim=`) is null, so
@@ -143,7 +142,7 @@ tests:
     # elbencho's live statistics interval. Its per-interval CSVs feed storage-scale-test's own
     # reports; they are what grows a collect.
     perf_live_interval_ms: "1000"
-    # No floor: 0 (or empty) skips that floor's subtest, with the measured numbers. Set to
-    # your own expectations to enforce a floor.
+    # No floor: 0 (or empty) passes that floor's subtest and only reports the measured
+    # numbers. Set to your own expectations to enforce a floor.
     perf_min_mbps: "0"
     perf_min_iops: "0"
