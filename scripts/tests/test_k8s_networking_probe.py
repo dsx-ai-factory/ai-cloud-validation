@@ -426,3 +426,13 @@ def test_suite_and_provider_wire_all_three_checks() -> None:
         assert step["output_schema"] == "k8s_networking"
         assert step["continue_on_failure"] is True
         assert step["timeout"] >= {"load_balancer": 4000, "dns_forwarding": 2500, "cidr_ranges": 1500}[mode]
+
+
+def test_service_labels_are_applied_for_label_selected_load_balancers(cluster: Cluster) -> None:
+    """A Service mode may carry labels, for LoadBalancer pools that select Services by label."""
+    settings = deepcopy(SETTINGS["load_balancer"])
+    settings["services"]["internal"]["labels"] = {"lb-pool": "project"}
+    output = MODULE.run("load_balancer", settings)
+    assert output["success"], output
+    assert cluster.objects[("service", "internal")]["metadata"]["labels"] == {"lb-pool": "project"}
+    assert cluster.objects[("service", "external")]["metadata"]["labels"] == {}
