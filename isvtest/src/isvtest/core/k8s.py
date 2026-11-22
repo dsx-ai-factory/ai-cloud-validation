@@ -1105,3 +1105,30 @@ def get_nodes_with_status() -> dict[str, str]:
     """
     nodes = get_all_nodes()
     return {node: get_node_status(node) for node in nodes}
+
+
+NODE_PINNING_NODE_NAME = "node_name"
+NODE_PINNING_NODE_SELECTOR = "node_selector"
+_NODE_PINNING_MODES = (NODE_PINNING_NODE_NAME, NODE_PINNING_NODE_SELECTOR)
+
+
+def node_pinning_mode(config: dict[str, Any]) -> str:
+    """Return how per-node test pods are placed on their node.
+
+    ``node_name`` (default) sets ``spec.nodeName`` and bypasses the scheduler.
+    ``node_selector`` selects the node by its ``kubernetes.io/hostname`` label, so
+    the pod goes through the cluster's scheduler. Use it on clusters whose GPU
+    allocator requires its scheduler (for example HAMi or Volcano), which refuse
+    GPU pods that arrive with ``spec.nodeName`` already set.
+    """
+    mode = str(config.get("node_pinning") or NODE_PINNING_NODE_NAME)
+    if mode not in _NODE_PINNING_MODES:
+        raise ValueError(f"node_pinning must be one of {', '.join(_NODE_PINNING_MODES)}, got {mode!r}")
+    return mode
+
+
+def node_pinning_spec(node: str, mode: str) -> dict[str, Any]:
+    """Pod spec fields that place a pod on ``node`` according to ``mode``."""
+    if mode == NODE_PINNING_NODE_SELECTOR:
+        return {"nodeSelector": {"kubernetes.io/hostname": node}}
+    return {"nodeName": node}

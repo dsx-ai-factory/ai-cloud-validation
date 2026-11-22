@@ -20,9 +20,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 from isvtest.config.settings import get_cuda_image, get_k8s_namespace
 from isvtest.core.k8s import (
+    NODE_PINNING_NODE_NAME,
     get_kubectl_base_shell,
     kubectl_items_or_fail,
     names_from_items,
+    node_pinning_mode,
+    node_pinning_spec,
     pod_state_from_result,
 )
 from isvtest.core.nvidia import count_gpus_from_full_output, parse_driver_version
@@ -83,12 +86,13 @@ class K8sNvidiaSmiCheck(BaseValidation):
 
         # Get runtime class from config (e.g., "nvidia" for MicroK8s)
         runtime_class = self.config.get("runtime_class")
+        node_pinning = node_pinning_mode(self.config)
 
         # Use ThreadPoolExecutor to run pods in parallel
         with ThreadPoolExecutor(max_workers=len(gpu_nodes)) as executor:
             futures = {
                 executor.submit(
-                    self._run_single_pod, node, image, kubectl_base, namespace, timeout, runtime_class
+                    self._run_single_pod, node, image, kubectl_base, namespace, timeout, runtime_class, node_pinning
                 ): node
                 for node in gpu_nodes
             }
@@ -104,7 +108,14 @@ class K8sNvidiaSmiCheck(BaseValidation):
         return results
 
     def _run_single_pod(
-        self, node: str, image: str, kubectl_base: str, namespace: str, timeout: int, runtime_class: str | None = None
+        self,
+        node: str,
+        image: str,
+        kubectl_base: str,
+        namespace: str,
+        timeout: int,
+        runtime_class: str | None = None,
+        node_pinning: str = NODE_PINNING_NODE_NAME,
     ) -> dict:
         """Run a single ephemeral pod on a specific node."""
         # Include node name in pod name for easier identification in logs
@@ -115,7 +126,7 @@ class K8sNvidiaSmiCheck(BaseValidation):
         # Add tolerations to ensure scheduling on tainted nodes
         overrides: dict = {
             "spec": {
-                "nodeName": node,
+                **node_pinning_spec(node, node_pinning),
                 "restartPolicy": "Never",
                 "tolerations": [
                     {"operator": "Exists"}  # Tolerate everything
