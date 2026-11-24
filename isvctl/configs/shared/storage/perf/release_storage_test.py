@@ -61,7 +61,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the step's arguments."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
-        "--results-dir", required=True, help="Results root: storage-scale-test writes one sweep directory per run here"
+        "--results-dir",
+        required=True,
+        type=sst.absolute_dir,
+        help="Results root: storage-scale-test writes one sweep directory per run here",
     )
     parser.add_argument(
         "--scale-test-base",

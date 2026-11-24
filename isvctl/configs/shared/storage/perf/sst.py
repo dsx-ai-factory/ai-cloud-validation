@@ -383,11 +383,23 @@ def describe_failure(stderr: str) -> str:
     return message + detail + "".join(f"; {item}" for item in extra)
 
 
+def absolute_dir(path: str) -> str:
+    """*path* as an absolute path, so it names the same directory after storage-scale-test changes directory."""
+    return str(Path(path).expanduser().resolve())
+
+
 def child_env(kubeconfig: str | None) -> dict[str, str]:
-    """The environment for storage-scale-test: ours, with KUBECONFIG set to *kubeconfig* if given."""
+    """The environment for storage-scale-test: ours, with KUBECONFIG set to *kubeconfig* if given.
+
+    Every KUBECONFIG entry is made absolute: storage-scale-test changes directory before it runs
+    kubectl, so a relative entry would stop naming the file this step was given.
+    """
     env = dict(os.environ)
-    if kubeconfig:
-        env["KUBECONFIG"] = kubeconfig
+    value = kubeconfig or env.get("KUBECONFIG", "")
+    if value:
+        env["KUBECONFIG"] = os.pathsep.join(
+            os.path.abspath(os.path.expanduser(entry)) if entry else entry for entry in value.split(os.pathsep)
+        )
     return env
 
 

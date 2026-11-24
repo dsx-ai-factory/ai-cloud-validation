@@ -17,7 +17,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
 
 import pytest
 
@@ -168,6 +170,33 @@ def test_child_env_uses_the_given_kubeconfig_else_the_shells(
     monkeypatch.setenv("KUBECONFIG", "/shell/config")
 
     assert SST.child_env(kubeconfig)["KUBECONFIG"] == expected
+
+
+@pytest.mark.parametrize(
+    ("kubeconfig", "inherited", "expected"),
+    [
+        ("cluster.yaml", "", ["cluster.yaml"]),
+        ("", "cluster.yaml", ["cluster.yaml"]),
+        ("", f"a.yaml{os.pathsep}/abs/b.yaml{os.pathsep}sub/c.yaml", ["a.yaml", "/abs/b.yaml", "sub/c.yaml"]),
+    ],
+    ids=["given", "inherited", "several-files"],
+)
+def test_child_env_makes_every_kubeconfig_entry_absolute(
+    kubeconfig: str, inherited: str, expected: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """storage-scale-test changes directory before kubectl runs, so a relative entry must not stay relative."""
+    monkeypatch.chdir(tmp_path)
+    if inherited:
+        monkeypatch.setenv("KUBECONFIG", inherited)
+
+    entries = SST.child_env(kubeconfig)["KUBECONFIG"].split(os.pathsep)
+
+    assert entries == [str(tmp_path / e) if not os.path.isabs(e) else e for e in expected]
+
+
+def test_child_env_leaves_kubeconfig_unset_when_none_is_given() -> None:
+    """Without --kubeconfig or KUBECONFIG, kubectl keeps its own default."""
+    assert "KUBECONFIG" not in SST.child_env("")
 
 
 # --- Counting a sweep's cells ---
