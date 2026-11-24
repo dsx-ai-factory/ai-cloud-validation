@@ -54,6 +54,20 @@ commands:
 
       # Submit, wait, collect. continue_on_failure lets evaluate_storage_test report what
       # a failed sweep left behind.
+      # storage-scale-test's validate_env.sh: fails fast (and skips the sweep) when the claim,
+      # its test directory, the image or the nodes cannot run it.
+      - name: preflight_storage_test
+        phase: test
+        command: "python ../../../shared/storage/perf/preflight_storage_test.py"
+        requires: [kubernetes]
+        args:
+          - "--kubeconfig={{steps.setup_cluster.kubeconfig_path | default('', true)}}"
+          - "--claim={{steps.setup_cluster.storage_perf.claim | default(perf_claim, true) | default('', true)}}"
+          - "--node-selector={{steps.setup_cluster.storage_perf.node_selector | default(perf_node_selector, true) | default('', true)}}"
+          - "--results-dir"
+          - "{{perf_results_dir}}"
+        output_schema: storage_perf_preflight
+        timeout: null
       - name: run_storage_test
         phase: test
         command: "python ../../../shared/storage/perf/run_storage_test.py"
@@ -78,6 +92,8 @@ commands:
           - "{{perf_wait_timeout_s}}"
           - "--live-interval-ms"
           - "{{perf_live_interval_ms}}"
+          # A YAML list of groups, or the same as a JSON string: either reaches the step as JSON.
+          - "--groups={{(perf_groups | default('', true)) if (perf_groups | default('', true)) is string else (perf_groups | tojson)}}"
         output_schema: storage_perf_run
         continue_on_failure: true
         # Self-limiting (see the step's docstring); no isvctl timeout.
@@ -142,6 +158,12 @@ tests:
     # elbencho's live statistics interval. Its per-interval CSVs feed storage-scale-test's own
     # reports; they are what grows a collect.
     perf_live_interval_ms: "1000"
+    # Empty: one sweep from the perf_* settings above. A list of 1 to 20 groups runs a
+    # storage-scale-test batch, one group per entry; each entry may set nodes, io_sizes,
+    # threads, iodepth and duration (any it leaves out takes the perf_* setting), and its own
+    # floors min_mbps and min_iops. For example:
+    #   perf_groups: [{io_sizes: "r4K", min_iops: 1000}, {io_sizes: "1M", threads: "1,2"}]
+    perf_groups: ""
     # No floor: 0 (or empty) passes that floor's subtest and only reports the measured
     # numbers. Set to your own expectations to enforce a floor.
     perf_min_mbps: "0"

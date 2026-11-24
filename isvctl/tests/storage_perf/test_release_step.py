@@ -28,6 +28,7 @@ from .conftest import (
     CLEANUP,
     COMPLETE,
     FINISHED,
+    MODULES,
     NEVER,
     RUNNING,
     SST,
@@ -238,7 +239,8 @@ def test_release_cancels_a_sweep_whose_state_is_unreadable(perf: InProcess, laun
 def test_release_leaves_a_sweep_when_the_cluster_is_out_of_reach(
     reply_: Any, reason: str, perf: InProcess, checkout: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Cancel and collect could only use up their timeouts; the sweep is left for a later teardown."""
+    """After asking again a few times, the sweep is left for a later teardown: cancel and collect
+    could only use up their timeouts."""
     operations: list[str] = []
     monkeypatch.setattr(SST, "run", lambda cmd, timeout, env=None: operations.append(cmd[1]) or reply_)
     sweep_dir = left_behind(checkout)
@@ -249,7 +251,18 @@ def test_release_leaves_a_sweep_when_the_cluster_is_out_of_reach(
     assert out["error"] == (
         f"cannot read the state of {sweep_dir} ({reason}); rerun `--phase teardown` once the cluster answers"
     )
-    assert operations == ["--status"]
+    assert operations == ["--status"] * (1 + MODULES["release_storage_test"].UNREACHABLE_RETRIES)
+
+
+def test_release_asks_again_when_one_status_goes_unanswered(perf: InProcess, launcher: FakeLauncher) -> None:
+    """One unanswered --status (a passing API error) does not leave the sweep holding the claim."""
+    launcher.statuses = ["FAIL", FINISHED]
+    sweep_dir = left_behind(launcher.base)
+
+    rc, out = release_step(perf, launcher.base)
+
+    assert rc == 0 and out["message"] == f"collected; cluster resources released. Results: {sweep_dir}"
+    assert launcher.operations()[:3] == ["--status", "--status", "--collect"]
 
 
 def test_release_never_cancels_while_another_run_holds_the_lock(perf: InProcess, launcher: FakeLauncher) -> None:
@@ -331,3 +344,25 @@ def test_release_with_an_unlistable_results_root_is_not_released(
     assert rc == 1 and out["released"] is False
     assert "Permission denied" in out["error"]
     assert_schema("release_storage_test", out)
+
+
+def test_release_finds_a_batch_left_running(perf: InProcess, launcher: FakeLauncher) -> None:
+    """A started batch (filesystem-batch-*) is released like a plain sweep."""
+    launcher.statuses = [RUNNING]
+    batch_dir = left_behind(launcher.base, "filesystem-batch-20260101Z000000")
+
+    rc, out = release_step(perf, launcher.base)
+
+    assert rc == 0 and out["message"] == f"collected; cluster resources released. Results: {batch_dir}"
+    assert_cancelled_before_collect(launcher)
+
+
+def test_release_takes_plain_sweeps_and_batches_oldest_first(perf: InProcess, launcher: FakeLauncher) -> None:
+    """Sweeps are released in the order they ran, by datestamp, whichever kind each is."""
+    launcher.statuses = [RUNNING]
+    newer = left_behind(launcher.base, "elbencho-20260102Z000000")
+    older = left_behind(launcher.base, "filesystem-batch-20260101Z000000")
+
+    found = SST.unreleased(launcher.base, str(launcher.base / "results"), {})
+
+    assert [d for d, _, _ in found] == [str(older), str(newer)]

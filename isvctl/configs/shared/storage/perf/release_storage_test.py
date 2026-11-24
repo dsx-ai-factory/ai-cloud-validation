@@ -28,8 +28,10 @@ Nothing to do (success) when no sweep there holds anything, or when the results 
 not exist: nothing has run from this directory, and the message names the path so a teardown
 run from the wrong directory shows. It holds the results root's lock while it runs; if another
 run or teardown holds it, it touches nothing and reports released false (the sweep is that
-run's to release). A sweep whose status cannot be read (the cluster is out of reach) is left
-alone: rerun `--phase teardown` once the cluster answers.
+run's to release). A sweep whose status cannot be read (the cluster is out of reach) is asked
+about again a few times (UNREACHABLE_RETRIES, UNREACHABLE_RETRY_S apart), then left alone: rerun
+`--phase teardown` once the cluster answers. A batch (filesystem-batch-*, from the run step's
+--groups) is released the same way as a plain sweep (elbencho-*).
 
 Usage:
     python release_storage_test.py --results-dir /path/to/results \\
@@ -55,6 +57,11 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # shared/storage/perf/ (for sst)
 
 import sst
+
+# How often, and how far apart, teardown asks again for a sweep's state that it could not read
+# before giving up on that sweep for this teardown.
+UNREACHABLE_RETRIES = 3
+UNREACHABLE_RETRY_S = 20
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -85,6 +92,14 @@ def _demo_result() -> dict[str, Any]:
 
 def _release(base: Path, sweep_dir: str, env: dict[str, str], kind: str, status: dict[str, str]) -> str | None:
     """Cancel one sweep if it may still run, then collect it; None once released, else why not."""
+    for _ in range(UNREACHABLE_RETRIES):
+        if kind != "unreachable":
+            break
+        # One unanswered --status is often a passing API error (seen live: API_UNAVAILABLE
+        # between two good answers), and giving up here leaves the claim held.
+        sst.log(f"{sweep_dir}: state unreadable ({status.get('DIAGNOSTIC_REASON', 'status timed out')}); asking again")
+        sst.CLOCK.sleep(UNREACHABLE_RETRY_S)
+        kind, status = sst.query(base, sweep_dir, env, lock_window_s=sst.LOCK_WINDOW_S)
     if kind == "unreachable":
         # Cancel and collect would only use up their own timeouts.
         reason = status.get("DIAGNOSTIC_REASON", "status timed out")

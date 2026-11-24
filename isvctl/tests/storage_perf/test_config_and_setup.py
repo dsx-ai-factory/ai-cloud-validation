@@ -176,6 +176,7 @@ def test_a_kubeconfig_setup_reports_wins() -> None:
     """A provider setup that creates its cluster reports kubeconfig_path; run and teardown use it."""
     assert _flag(_render("run_storage_test"), "--kubeconfig") == "/tmp/kubeconfig"
     assert _flag(_render("release_storage_test"), "--kubeconfig") == "/tmp/kubeconfig"
+    assert _flag(_render("preflight_storage_test"), "--kubeconfig") == "/tmp/kubeconfig"
 
 
 def test_self_limiting_steps_have_no_isvctl_timeout() -> None:
@@ -192,6 +193,7 @@ def test_self_limiting_steps_have_no_isvctl_timeout() -> None:
 def test_demo_outputs_match_their_schemas(step: str, tmp_path: Path) -> None:
     """Each perf step's demo-mode output (ISVCTL_DEMO_MODE=1) passes schema validation."""
     args = {
+        "preflight_storage_test": ["--claim=a/b", "--node-selector=a=b", "--results-dir=/x"],
         "run_storage_test": ["--claim=a/b", "--node-selector=a=b", "--results-dir=/x"],
         "evaluate_storage_test": [],
         "release_storage_test": ["--results-dir=/x"],
@@ -232,3 +234,20 @@ def test_demo_outputs_match_their_schemas(step: str, tmp_path: Path) -> None:
 def test_schemas_reject_outputs_missing_what_later_steps_read(step: str, output: dict[str, Any]) -> None:
     """A step that reports success without the fields later steps depend on fails at the step."""
     assert_schema(step, output, valid=False)
+
+
+def test_preflight_checks_what_the_run_sweeps() -> None:
+    """The preflight step gets the same claim, node selector and results root as the run step."""
+    preflight, run = _render("preflight_storage_test"), _render("run_storage_test")
+
+    for flag in ("--claim", "--node-selector", "--results-dir", "--kubeconfig"):
+        assert _flag(preflight, flag) == _flag(run, flag)
+
+
+def test_preflight_runs_before_the_sweep_and_stops_the_phase_when_it_fails() -> None:
+    """It is the test phase's first perf step and not continue_on_failure, so a failure skips the sweep."""
+    steps = [s for s in _config().commands["storage"].steps if s.phase == "test"]
+    names = [s.name for s in steps]
+
+    assert names.index("preflight_storage_test") < names.index("run_storage_test")
+    assert next(s for s in steps if s.name == "preflight_storage_test").continue_on_failure is False

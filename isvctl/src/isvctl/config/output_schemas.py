@@ -177,6 +177,7 @@ STEP_SCHEMA_MAPPING: dict[str, str | None] = {
     "list_k8s_versions": "k8s_offered_versions",
     "describe_control_plane_patching": "k8s_control_plane_patching",
     # Storage performance (config/overlays/storage-perf.yaml and the shared perf steps)
+    "preflight_storage_test": "storage_perf_preflight",
     "run_storage_test": "storage_perf_run",
     "evaluate_storage_test": "storage_perf_evaluate",
     "release_storage_test": "storage_perf_release",
@@ -1808,7 +1809,19 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
                 ),
             },
             "resources_released": {"type": ["boolean", "null"], "description": "null when nothing was submitted"},
-            "results_dir": {"type": "string", "description": "The sweep directory (elbencho-*) under the results root"},
+            "results_dir": {
+                "type": "string",
+                "description": "The sweep directory under the results root: elbencho-*, or filesystem-batch-* for a batch",
+            },
+            "deadline_reached": {
+                "type": "boolean",
+                "description": "The wait deadline passed and the sweep was cancelled (it may have finished first)",
+            },
+            "groups": {
+                "type": "array",
+                "description": "A batch's groups as submitted (group_id, settings, optional min_mbps/min_iops)",
+                "items": {"type": "object", "required": ["group_id"]},
+            },
             "executions": {
                 "type": "object",
                 "properties": {
@@ -1833,6 +1846,18 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         "additionalProperties": True,
         "description": "run_storage_test: submit, wait for and collect a storage-scale-test sweep",
+    },
+    "storage_perf_preflight": {
+        "type": "object",
+        "required": ["success", "platform", "test_name"],
+        "properties": {
+            **COMMON_PROPERTIES,
+            "test_name": {"const": "preflight_storage_test"},
+            "message": {"type": "string", "description": "What validate_env.sh checked and passed"},
+            "error": {"type": "string", "description": "validate_env.sh's errors"},
+        },
+        "additionalProperties": True,
+        "description": "preflight_storage_test: storage-scale-test's validate_env.sh for the claim and nodes",
     },
     "storage_perf_evaluate": {
         "type": "object",
