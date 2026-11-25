@@ -658,3 +658,28 @@ def test_every_call_uses_the_kubeconfig_it_is_given(
 
     assert rc == 0, out
     assert {env.get("KUBECONFIG") for env in launcher.envs} == {kubeconfig}
+
+
+def test_a_relative_results_root_and_kubeconfig_are_made_absolute_before_submit(
+    perf: InProcess, launcher: FakeLauncher, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """storage-scale-test changes directory, so env.sh, its inputs and KUBECONFIG must not stay relative."""
+    workdir = tmp_path / "step-workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    base = launcher.base
+    args = ["--claim=perf-ns/perf-claim", "--node-selector=storage-test=true"]
+
+    rc, out = perf(
+        "run_storage_test", f"--scale-test-base={base}", *args, "--results-dir=rel-results", "--kubeconfig=cluster.yaml"
+    )
+
+    assert rc == 0, out
+    root = workdir / "rel-results"
+    env_sh = (base / "env.sh").read_text()
+    assert f"export RESULTS_DIR={SST.bash_quote(str(root))}\n" in env_sh
+    assert f"export LOGS_DIR={SST.bash_quote(str(root / 'logs'))}\n" in env_sh
+    submit = launcher.calls[0].split()
+    assert submit[1] == str(root / "target.env") and submit[3] == str(root / "workload.env")
+    assert out["progress_log"].startswith(str(root / "run-logs"))
+    assert {env["KUBECONFIG"] for env in launcher.envs} == {str(workdir / "cluster.yaml")}

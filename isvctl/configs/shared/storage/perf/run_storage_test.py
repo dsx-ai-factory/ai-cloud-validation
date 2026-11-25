@@ -107,7 +107,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--iodepth", default="1", help="Comma-separated IO depths")
     parser.add_argument("--duration", type=int, default=10, help="Seconds per write and read phase")
     parser.add_argument(
-        "--results-dir", required=True, help="Results root: storage-scale-test writes one sweep directory per run here"
+        "--results-dir",
+        required=True,
+        type=sst.absolute_dir,
+        help="Results root: storage-scale-test writes one sweep directory per run here",
     )
     parser.add_argument(
         "--wait-timeout", default=AUTO, help="Seconds to wait for the sweep: auto (sized from the sweep) or N"
@@ -212,7 +215,7 @@ def _submit(
 ) -> tuple[str | None, str]:
     """Write the inputs and submit the sweep; return (sweep_dir, error)."""
     sst.install_env_sh(base, _env_settings(args))
-    target, workload = _write_inputs(args, Path(args.results_dir).resolve())
+    target, workload = _write_inputs(args, Path(args.results_dir))
     cmd = [str(base / sst.LAUNCHER), "--target", str(target), "--env-override", str(workload), "--nodes", args.nodes]
     sst.log("submitting: " + " ".join(cmd))
     proc = sst.run(cmd, sst.COMMAND_TIMEOUT_S, env)
@@ -357,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         "resources_released": None,
     }
     try:
-        progress = sst.ProgressLog(Path(args.results_dir).resolve() / "run-logs")
+        progress = sst.ProgressLog(Path(args.results_dir) / "run-logs")
     except OSError as exc:
         result["error"] = f"cannot create the progress log: {exc}"
         return sst.emit(result)

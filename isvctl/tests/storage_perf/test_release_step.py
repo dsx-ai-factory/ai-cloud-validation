@@ -331,3 +331,16 @@ def test_release_with_an_unlistable_results_root_is_not_released(
     assert rc == 1 and out["released"] is False
     assert "Permission denied" in out["error"]
     assert_schema("release_storage_test", out)
+
+
+def test_release_resolves_a_relative_results_root(
+    perf: InProcess, checkout: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Teardown scans the same absolute root the run step wrote to, whatever the working directory."""
+    (checkout / "results").mkdir()
+    monkeypatch.chdir(checkout)
+
+    rc, out = perf("release_storage_test", "--results-dir=results", f"--scale-test-base={checkout}")
+
+    assert rc == 0, out
+    assert out["message"] == f"no sweep under {checkout.resolve() / 'results'} holds cluster resources"
