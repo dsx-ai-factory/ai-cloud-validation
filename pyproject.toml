@@ -33,11 +33,12 @@ dev = [
 [tool.uv.workspace]
 members = ["isvctl", "isvtest", "isvreporter"]
 
-# Pin transitive deps with known HIGH CVEs until upstream minimums catch up (Trivy / uv.lock).
+# Pin transitive dependencies with known vulnerabilities until upstream minimums catch up.
 [tool.uv]
 required-version = ">=0.13.5"
 # Security floors for transitive dependencies; preserve upstream compatibility constraints.
 constraint-dependencies = [
+    "idna>=3.15",
     "lxml>=6.1.1",
     "oauthlib>=4.0.1",
     "pygments>=2.20.0",
@@ -47,7 +48,7 @@ override-dependencies = [
     "certifi>=2026.10.23",
     "cryptography>=50.0.2",
     "pyasn1>=0.6.5",
-    "requests>=2.32.5",
+    "requests>=2.33.0",
 ]
 
 [tool.ruff]
