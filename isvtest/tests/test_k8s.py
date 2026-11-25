@@ -679,3 +679,21 @@ class TestWaitingReasonConstants:
     def test_terminal_and_transient_are_disjoint(self) -> None:
         """Verify terminal and transient are disjoint."""
         assert TERMINAL_WAITING_REASONS.isdisjoint(TRANSIENT_WAITING_REASONS)
+
+
+def test_node_pinning_defaults_to_node_name() -> None:
+    from isvtest.core.k8s import node_pinning_mode, node_pinning_spec
+
+    assert node_pinning_spec("n1", node_pinning_mode({})) == {"nodeName": "n1"}
+    assert node_pinning_spec("n1", node_pinning_mode({"node_pinning": "node_selector"})) == {
+        "nodeSelector": {"kubernetes.io/hostname": "n1"}
+    }
+
+
+def test_node_pinning_rejects_unknown_mode() -> None:
+    import pytest
+
+    from isvtest.core.k8s import node_pinning_mode
+
+    with pytest.raises(ValueError):
+        node_pinning_mode({"node_pinning": "affinity"})

@@ -26,7 +26,15 @@ from isvtest.config.settings import (
     get_gpu_stress_timeout,
     get_k8s_namespace,
 )
-from isvtest.core.k8s import get_gpu_nodes, get_kubectl_base_shell, get_kubectl_command, get_node_gpu_count
+from isvtest.core.k8s import (
+    NODE_PINNING_NODE_NAME,
+    NODE_PINNING_NODE_SELECTOR,
+    get_gpu_nodes,
+    get_kubectl_base_shell,
+    get_kubectl_command,
+    get_node_gpu_count,
+    node_pinning_mode,
+)
 from isvtest.core.workload import BaseWorkloadCheck
 
 
@@ -47,6 +55,7 @@ class K8sGpuStressWorkload(BaseWorkloadCheck):
         # COS where containerd uses the device-plugin model without a named
         # nvidia runtime handler).
         runtime_class_name = self.config.get("runtime_class_name", "nvidia")
+        node_pinning = node_pinning_mode(self.config)
 
         # Get GPU nodes
         # Note: We still rely on k8s_utils here for convenience
@@ -84,6 +93,7 @@ class K8sGpuStressWorkload(BaseWorkloadCheck):
                 runtime=runtime,
                 memory_gb=memory_gb,
                 runtime_class_name=runtime_class_name,
+                node_pinning=node_pinning,
             )
 
             # Run the job (using run_k8s_job logic but adapted for pod since we create raw Pod here)
@@ -172,6 +182,7 @@ class K8sGpuStressWorkload(BaseWorkloadCheck):
         runtime: int,
         memory_gb: int,
         runtime_class_name: str = "nvidia",
+        node_pinning: str = NODE_PINNING_NODE_NAME,
     ) -> str:
         """Create pod YAML for GPU stress test."""
         script_path = Path(__file__).parent / "scripts" / "gpu_stress_torch.py"
@@ -193,6 +204,10 @@ class K8sGpuStressWorkload(BaseWorkloadCheck):
 
         env_section = "\n".join(env_vars)
         runtime_class_line = f"  runtimeClassName: {runtime_class_name}\n" if runtime_class_name else ""
+        if node_pinning == NODE_PINNING_NODE_SELECTOR:
+            placement_lines = f"  nodeSelector:\n    kubernetes.io/hostname: {node_name}\n"
+        else:
+            placement_lines = f"  nodeName: {node_name}\n"
 
         pod_yaml = f"""apiVersion: v1
 kind: Pod
@@ -204,8 +219,7 @@ metadata:
     test-node: {node_name}
 spec:
   restartPolicy: Never
-  nodeName: {node_name}
-  containers:
+{placement_lines}  containers:
   - name: gpu-stress
     image: {image}
     command: ["/bin/bash", "-c"]

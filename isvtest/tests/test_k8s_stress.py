@@ -15,7 +15,10 @@
 
 """Tests for the Kubernetes GPU stress pod spec."""
 
+import yaml
+
 from isvtest.config.settings import DEFAULT_PYTORCH_IMAGE
+from isvtest.core.k8s import NODE_PINNING_NODE_SELECTOR
 from isvtest.workloads.k8s_stress import K8sGpuStressWorkload
 
 
@@ -34,3 +37,30 @@ def test_stress_pod_runs_a_script_the_pytorch_image_can_import() -> None:
     assert "cupy" not in pod_yaml.lower()
     assert f"image: {DEFAULT_PYTORCH_IMAGE}" in pod_yaml
     assert 'nvidia.com/gpu: "4"' in pod_yaml
+
+
+def _stress_pod(**kwargs) -> str:
+    return K8sGpuStressWorkload()._create_pod_yaml(
+        pod_name="gpu-stress",
+        node_name="node-1",
+        gpu_count=1,
+        namespace="default",
+        image=DEFAULT_PYTORCH_IMAGE,
+        runtime=30,
+        memory_gb=1,
+        **kwargs,
+    )
+
+
+def test_stress_pod_is_pinned_with_node_name_by_default() -> None:
+    """Default placement bypasses the scheduler, as before."""
+    pod = yaml.safe_load(_stress_pod())
+    assert pod["spec"]["nodeName"] == "node-1"
+    assert "nodeSelector" not in pod["spec"]
+
+
+def test_stress_pod_can_be_placed_through_the_scheduler() -> None:
+    """node_selector placement leaves scheduling to the cluster's (GPU-aware) scheduler."""
+    pod = yaml.safe_load(_stress_pod(node_pinning=NODE_PINNING_NODE_SELECTOR))
+    assert pod["spec"]["nodeSelector"] == {"kubernetes.io/hostname": "node-1"}
+    assert "nodeName" not in pod["spec"]
