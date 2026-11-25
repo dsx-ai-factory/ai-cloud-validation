@@ -15,7 +15,7 @@
 
 """Tests for NVIDIA parsing helpers."""
 
-from isvtest.core.nvidia import count_gpus_from_full_output, parse_cuda_version
+from isvtest.core.nvidia import count_gpus_from_full_output, parse_cuda_version, parse_driver_version
 
 _T4_SINGLE = """\
 +---------------------------------------------------------------------------------------+
@@ -77,3 +77,9 @@ class TestParseCudaVersion:
 
     def test_returns_none_when_missing(self) -> None:
         assert parse_cuda_version("Driver Version: 550.54.15") is None
+
+
+def test_parse_driver_version_kmd_header() -> None:
+    """Recognize the KMD header emitted by newer nvidia-smi versions."""
+    output = "| NVIDIA-SMI 620.70.06  KMD Version: 620.70.06  CUDA UMD Version: 13.5 |"
+    assert parse_driver_version(output) == "620.70.06"

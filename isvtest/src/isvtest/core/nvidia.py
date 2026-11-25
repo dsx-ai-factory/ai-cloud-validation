@@ -129,7 +129,7 @@ def parse_driver_version(output: str) -> str | None:
         Driver version string (e.g., "580.95.05") or None if not found
     """
     # Try full output format first: "Driver Version: 580.95.05"
-    match = re.search(r"Driver Version:\s+([\d.]+)", output)
+    match = re.search(r"(?:Driver|KMD) Version:\s+([\d.]+)", output)
     if match:
         return match.group(1)
 
