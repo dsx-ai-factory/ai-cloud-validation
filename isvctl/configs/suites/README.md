@@ -336,7 +336,9 @@ command overlay `providers/my-isv/config/overlays/storage-perf.yaml` supplies (l
 existing claim, named by `STORAGE_PERF_CLAIM`; the benchmark steps are shared, so a provider
 supplies only `setup_cluster` (as shipped, the generic `scripts/k8s/setup.sh`, which
 inventories the current cluster and creates nothing). `setup_cluster` uses the `generic` schema; every
-other step's output has a `storage_perf_*` schema. Two checks read them:
+other step's output has a `storage_perf_*` schema. Three checks read them:
+`StoragePerfPreflightCheck` (test_id `N/A`) on `preflight_storage_test`, which runs
+storage-scale-test's `validate_env.sh` first and stops the sweep when it fails;
 `StoragePerfSweepCheck` (HSS02-02) on `evaluate_storage_test`, with a subtest per entry in
 its `tests` (a floor of 0 only reports), and the teardown check
 `StoragePerfSweepReleasedCheck` (test_id `N/A`) on `release_storage_test`. See
@@ -345,7 +347,8 @@ its `tests` (a floor of 0 only reports), and the teardown check
 | Step | Phase | Script | Key JSON Fields |
 |------|-------|--------|-----------------|
 | `setup_cluster` | setup | `providers/my-isv/scripts/k8s/setup.sh` | none used by the perf steps; a provider's own setup may report `kubeconfig_path` (else `KUBECONFIG`) and `storage_perf.{claim,node_selector}` |
-| `run_storage_test` | test | `shared/storage/perf/run_storage_test.py` | `state`, `results_dir`, `executions`, `resources_released`, `progress_log` |
+| `preflight_storage_test` | test | `shared/storage/perf/preflight_storage_test.py` | `success`, `message`, `error` |
+| `run_storage_test` | test | `shared/storage/perf/run_storage_test.py` | `state`, `results_dir`, `executions`, `groups` (a batch), `resources_released`, `progress_log` |
 | `evaluate_storage_test` | test | `shared/storage/perf/evaluate_storage_test.py` | `headline`, `tests.{sweep_completed,results_present,bandwidth_meets_min,iops_meets_min}` |
 | `release_storage_test` | teardown | `shared/storage/perf/release_storage_test.py` | `released`, `message` |
 

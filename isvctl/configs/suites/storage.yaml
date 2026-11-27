@@ -564,6 +564,19 @@ tests:
     # One sweep, one test: a class (validations/storage_perf.py) that reports each stage as
     # a subtest - sweep_completed (from the run step's result), results_present,
     # bandwidth_meets_min and iops_meets_min - with the measured numbers in each.
+    # Before the sweep, not a requirement (test_id N/A): storage-scale-test's validate_env.sh
+    # for the claim and nodes. When it fails, the sweep is not run (the step stops the phase).
+    perf_preflight:
+      step: preflight_storage_test
+      checks:
+        StoragePerfPreflightCheck:
+          test_id: "N/A"
+          labels: ["kubernetes", "performance", "storage"]
+          requires: [kubernetes]
+          description: "Check storage-scale-test's validate_env.sh passes for the claim and nodes"
+          compose:
+            - StepSuccessCheck: {}
+
     perf_sweep:
       step: evaluate_storage_test
       checks:

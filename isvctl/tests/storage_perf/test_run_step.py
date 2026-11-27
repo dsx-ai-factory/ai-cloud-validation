@@ -201,6 +201,7 @@ def test_a_sweep_that_outlives_the_wait_is_cancelled_and_collected(perf: InProce
     rc, out = run_step(perf, launcher.base, "--wait-timeout", "60")
 
     assert rc == 1 and out["state"] == "TIMEOUT" and out["resources_released"] is True
+    assert out["deadline_reached"] is True
     # The counts are collect's final view, not the last RUNNING poll (0 succeeded).
     assert out["executions"] == {"total": 2, "succeeded": 2, "failed": 0}
     assert_cancelled_before_collect(launcher)
@@ -218,6 +219,8 @@ def test_a_sweep_that_finished_before_its_cancel_is_a_normal_finish(
 
     assert rc == 0, out
     assert out["state"] == "SUCCESS" and "error" not in out
+    # The deadline cancel still happened, and the result says so.
+    assert out["deadline_reached"] is True
     assert_cancelled_before_collect(launcher)
 
 
@@ -407,12 +410,14 @@ def test_a_sweep_that_cannot_work_is_rejected_before_submit(
     assert_schema("run_storage_test", out)
 
 
-def test_a_missing_claim_is_rejected_before_anything_is_logged(perf: InProcess, launcher: FakeLauncher) -> None:
-    """perf_claim is required: an empty one is rejected before the plan is logged."""
+def test_a_missing_claim_is_rejected_and_the_log_says_why(perf: InProcess, launcher: FakeLauncher) -> None:
+    """perf_claim is required: an empty one is rejected before the plan, and the log says why nothing ran."""
     rc, out = run_step(perf, launcher.base, "--claim", "")
 
     assert rc == 1 and out["error"] == f"--claim is empty; {CLAIM}"
-    assert Path(out["progress_log"]).read_text() == ""
+    lines = Path(out["progress_log"]).read_text().splitlines()
+    assert len(lines) == 1 and lines[0].split("  ", 2)[2] == f"NOT_SUBMITTED: --claim is empty; {CLAIM}"
+    assert launcher.calls == []
 
 
 def test_auto_wait_sizes_the_deadline_from_the_sweep(perf: InProcess, launcher: FakeLauncher) -> None:
@@ -423,8 +428,8 @@ def test_auto_wait_sizes_the_deadline_from_the_sweep(perf: InProcess, launcher: 
 
     assert rc == 1 and out["error"] == "sweep did not finish within 1020s (--wait-timeout auto)"
     assert events(out, "estimate") == [{"cells": "8", "estimate_s": "510", "deadline_s": "1020"}]
-    assert SST.auto_wait_s(1, 1) == SST.WAIT_FLOOR_S
-    assert SST.auto_wait_s(10_000, 1) == SST.WAIT_CAP_S
+    assert SST.auto_wait_s(SST.estimate_s([(1, 1)])) == SST.WAIT_FLOOR_S
+    assert SST.auto_wait_s(SST.estimate_s([(10_000, 1)])) == SST.WAIT_CAP_S
 
 
 @pytest.mark.parametrize("how", ["flag", "env"])
@@ -658,3 +663,178 @@ def test_every_call_uses_the_kubeconfig_it_is_given(
 
     assert rc == 0, out
     assert {env.get("KUBECONFIG") for env in launcher.envs} == {kubeconfig}
+
+
+# --- A batch of groups (--groups) ---
+
+GROUPS = (
+    '[{"io_sizes": "r4K", "iodepth": "1,16"}, {"io_sizes": ["1M"], "threads": "4", "nodes": "1,2", "duration": 20}]'
+)
+
+
+def test_groups_prepare_append_and_start_one_batch(perf: InProcess, launcher: FakeLauncher) -> None:
+    """--groups runs one storage-scale-test batch: --batch, one --append per further group, --start."""
+    rc, out = run_step(perf, launcher.base, f"--groups={GROUPS}")
+
+    assert rc == 0, out
+    batch_dir = launcher.sweep_dirs[0]
+    assert out["results_dir"] == str(batch_dir) and batch_dir.name.startswith("filesystem-batch-")
+    assert launcher.operations() == ["submit", "submit", "submit", "--status", "--status", "--collect", "--status"]
+    results = launcher.base / "results"
+    target = results / "target.env"
+    assert launcher.calls[:3] == [
+        f"--batch --target {target} --env-override {results / 'workload-01.env'} --nodes 1",
+        f"--append {batch_dir} --target {target} --env-override {results / 'workload-02.env'} --nodes 1,2",
+        f"--start {batch_dir}",
+    ]
+    first = (results / "workload-01.env").read_text()
+    second = (results / "workload-02.env").read_text()
+    assert "ELBENCHO_SCALE_IO_SIZES=('r4K')" in first and "ELBENCHO_IODEPTH_LIST=('1' '16')" in first
+    assert "ELBENCHO_SCALE_THREAD_LIST=('1')" in first and "ELBENCHO_SCALE_READ_WRITE_DURATION=10" in first
+    assert "ELBENCHO_SCALE_IO_SIZES=('1M')" in second and "ELBENCHO_SCALE_THREAD_LIST=('4')" in second
+    assert "ELBENCHO_SCALE_READ_WRITE_DURATION=20" in second
+    # Cells across every group: 1 node x 1 size x 1 thread x 2 depths, then 2 nodes x 1 x 1 x 1.
+    assert events(out, "estimate")[0]["cells"] == "4"
+    assert SST.unreleased(launcher.base, str(results), {}) == []
+    assert_schema("run_storage_test", out)
+
+
+@pytest.mark.parametrize(
+    ("groups", "error"),
+    [
+        ("not json", "--groups is not JSON"),
+        ("[]", "--groups has 0 groups; a batch takes 1 to 20"),
+        ('{"io_sizes": "1M"}', "--groups must be a JSON list of objects"),
+        ("[" + ",".join(["{}"] * 21) + "]", "--groups has 21 groups; a batch takes 1 to 20"),
+        ('[{"io_size": "1M"}]', "--groups entry 1 has unknown keys ['io_size']"),
+        ('[{"duration": "ten"}]', '--groups entry 1: duration is "ten"; give a whole number of seconds, 1 or more'),
+        ('[{"duration": -30}]', "--groups entry 1: duration is -30; give a whole number of seconds, 1 or more"),
+        ('[{"duration": true}]', "--groups entry 1: duration is true; give a whole number of seconds, 1 or more"),
+        ('[{"min_mbps": -1}]', "--groups entry 1: min_mbps is -1; give a number, 0 or more"),
+        ('[{"min_iops": "lots"}]', '--groups entry 1: min_iops is "lots"; give a number, 0 or more'),
+    ],
+)
+def test_bad_groups_are_rejected_before_submit(
+    groups: str, error: str, perf: InProcess, launcher: FakeLauncher
+) -> None:
+    """A --groups value the step cannot read stops it before it calls storage-scale-test."""
+    rc, out = run_step(perf, launcher.base, f"--groups={groups}")
+
+    assert rc == 1 and out["state"] == "NOT_SUBMITTED"
+    assert out["error"].startswith(error), out["error"]
+    assert launcher.calls == []
+
+
+@pytest.mark.parametrize(
+    ("failing", "named"),
+    [("--batch", "group 1 of 2 (batch)"), ("--append", "group 2 of 2 (append)"), ("--start", "start")],
+)
+def test_a_batch_that_fails_to_start_holds_nothing(
+    failing: str, named: str, perf: InProcess, launcher: FakeLauncher
+) -> None:
+    """A batch that failed before --start started it is only a draft: nothing to wait for or release.
+    The error names the group whose call failed, and points at the group keys."""
+    launcher.batch_fails = failing
+
+    rc, out = run_step(perf, launcher.base, f"--groups={GROUPS}")
+
+    assert rc == 1 and out["error"].startswith(f"{named} exited 1"), out
+    if failing != "--start":
+        assert out["error"].endswith(RUN.GROUP_HINT)
+    assert "--status" not in launcher.operations()
+    assert SST.unreleased(launcher.base, str(launcher.base / "results"), {}) == []
+
+
+def test_a_group_takes_the_options_for_keys_it_leaves_out_or_nulls(perf: InProcess, launcher: FakeLauncher) -> None:
+    """A missing or null key takes the option; numbers and lists of numbers are accepted."""
+    groups = '[{"iodepth": null, "threads": 2}, {"io_sizes": ["1M"], "threads": [1, 2], "nodes": 2}]'
+
+    rc, out = run_step(perf, launcher.base, "--iodepth", "1", "--duration", "15", f"--groups={groups}")
+
+    assert rc == 0, out
+    results = launcher.base / "results"
+    first = (results / "workload-01.env").read_text()
+    assert "ELBENCHO_IODEPTH_LIST=('1')" in first and "ELBENCHO_SCALE_THREAD_LIST=('2')" in first
+    assert "ELBENCHO_SCALE_IO_SIZES=('r4K' '1M')" in first and "ELBENCHO_SCALE_READ_WRITE_DURATION=15" in first
+    assert "ELBENCHO_SCALE_THREAD_LIST=('1' '2')" in (results / "workload-02.env").read_text()
+    assert launcher.calls[1].endswith("--nodes 2")
+
+
+def test_a_batch_reports_each_group_with_its_id_and_floors(perf: InProcess, launcher: FakeLauncher) -> None:
+    """The run result lists each group as storage-scale-test numbered it, for the evaluate step."""
+    groups = '[{"io_sizes": "r4K", "min_iops": 1000}, {"io_sizes": "1M", "min_mbps": "250.5"}]'
+
+    rc, out = run_step(perf, launcher.base, f"--groups={groups}")
+
+    assert rc == 0, out
+    common = {"nodes": "1", "threads": "1", "iodepth": "1", "duration": 10}
+    assert out["groups"] == [
+        {"group_id": "0001", "io_sizes": "r4K", **common, "min_iops": 1000.0},
+        {"group_id": "0002", "io_sizes": "1M", **common, "min_mbps": 250.5},
+    ]
+    assert_schema("run_storage_test", out)
+
+
+def test_a_plain_sweep_reports_no_groups(perf: InProcess, launcher: FakeLauncher) -> None:
+    """Without --groups, nothing changes: no groups in the result and one workload.env."""
+    rc, out = run_step(perf, launcher.base)
+
+    assert rc == 0 and "groups" not in out
+    assert sorted(p.name for p in (launcher.base / "results").glob("workload*.env")) == ["workload.env"]
+
+
+def test_workload_files_from_an_earlier_run_are_removed(perf: InProcess, launcher: FakeLauncher) -> None:
+    """Only this run's inputs stay next to target.env, whatever an earlier run left."""
+    results = launcher.base / "results"
+    results.mkdir(parents=True)
+    for stale in ("workload.env", "workload-01.env", "workload-03.env"):
+        (results / stale).write_text("ELBENCHO_SCALE_IO_SIZES=('stale')\n")
+
+    rc, out = run_step(perf, launcher.base, f"--groups={GROUPS}")
+
+    assert rc == 0, out
+    assert sorted(p.name for p in results.glob("workload*.env")) == ["workload-01.env", "workload-02.env"]
+    assert "stale" not in (results / "workload-01.env").read_text()
+
+
+def test_start_is_announced_in_the_progress_log(perf: InProcess, launcher: FakeLauncher) -> None:
+    """--start runs about a minute before it prints; the log says it began."""
+    rc, out = run_step(perf, launcher.base, f"--groups={GROUPS}")
+
+    assert rc == 0, out
+    assert [line.split("  ")[2] for line in Path(out["progress_log"]).read_text().splitlines()][:5] == [
+        "estimate",
+        "batch",
+        "append",
+        "starting",
+        "start",
+    ]
+
+
+def test_a_batch_holds_the_checkout_for_all_its_calls(perf: InProcess, launcher: FakeLauncher) -> None:
+    """--batch, each --append and --start read env.sh: the checkout's lock covers all of them."""
+    held: list[bool] = []
+    launcher.on_call = lambda args: held.append(not lock_is_free(launcher.base / SST.CHECKOUT_LOCK))
+
+    rc, out = run_step(perf, launcher.base, f"--groups={GROUPS}")
+
+    assert rc == 0, out
+    assert held[:3] == [True, True, True]
+    assert lock_is_free(launcher.base / SST.CHECKOUT_LOCK)
+    assert RUN.SUBMIT_WAIT_S >= (RUN.MAX_GROUPS + 1) * SST.COMMAND_TIMEOUT_S
+
+
+def test_bad_groups_are_logged_as_not_submitted(perf: InProcess, launcher: FakeLauncher) -> None:
+    """A rejected --groups leaves a log line saying why nothing ran, not an empty log."""
+    rc, out = run_step(perf, launcher.base, '--groups=[{"duration": -5}]')
+
+    assert rc == 1
+    last = Path(out["progress_log"]).read_text().splitlines()[-1].split("  ", 2)[2]
+    assert last == f"NOT_SUBMITTED: {out['error']}"
+
+
+def test_a_sweep_that_finishes_in_time_reports_no_deadline(perf: InProcess, launcher: FakeLauncher) -> None:
+    """deadline_reached appears only when the deadline passed."""
+    rc, out = run_step(perf, launcher.base)
+
+    assert rc == 0 and "deadline_reached" not in out

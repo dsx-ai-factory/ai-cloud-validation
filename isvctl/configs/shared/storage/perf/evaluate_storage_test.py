@@ -67,7 +67,11 @@ import sst
 
 OPERATIONS = ("write", "read")
 TERMINAL_OK = "SUCCESS"
+NOT_SUBMITTED = "NOT_SUBMITTED"
 RESULTS_JSON = "results.json"
+# A batch directory holds this manifest; the extractor writes a batch's document under reports/.
+BATCH_MANIFEST = "batch-manifest.tsv"
+BATCH_REPORTS = "reports"
 RESULTS_SCHEMA = "storage-scale-test/filesystem-batch-results"
 # Each floor's unit as shown, and the setting that sets it (isvctl/configs/shared/storage/perf/README.md).
 FLOORS = {"mbps": ("MB/s", "perf_min_mbps"), "iops": ("IOPS", "perf_min_iops")}
@@ -148,7 +152,8 @@ def _load_results(base: Path, sweep_dir: str, timeout: int) -> tuple[dict[str, A
     status, as storage-scale-test documents; a stale document is removed first so a
     failed extraction cannot be read as this run's results.
     """
-    document = Path(sweep_dir) / RESULTS_JSON
+    root = Path(sweep_dir)
+    document = (root / BATCH_REPORTS if (root / BATCH_MANIFEST).is_file() else root) / RESULTS_JSON
     document.unlink(missing_ok=True)
     # The live-sample summary is the slow part of extraction, and nothing here reads it.
     command = [str(base / sst.EXTRACTOR), sweep_dir, "--to-json", "--live-detail", "none"]
@@ -297,6 +302,61 @@ def _sweep_completed(run: dict[str, Any]) -> dict[str, Any]:
     return {"passed": False, "error": f"run step ended {state}{counts}: {reason}"}
 
 
+def _summary(headline: dict[str, Any]) -> str:
+    """Each operation's headline numbers, e.g. ``write 180.2 MB/s, 170.0 IOPS, 5.0 ms avg latency``."""
+    return "; ".join(
+        f"{op} {n['best_mbps']} MB/s, {n['best_iops']} IOPS, {n['min_avg_latency_ms']} ms avg latency"
+        for op, n in headline.items()
+    )
+
+
+def _slowest(best: dict[str, Any] | None, unit: str) -> float | None:
+    """The slower operation's best rate in *unit* (mbps or iops); None unless both operations have one."""
+    if not best or any(op not in best for op in OPERATIONS):
+        return None
+    return min(best[op][f"best_{unit}"] for op in OPERATIONS)
+
+
+def _floors_test(
+    unit: str, floor: float, best: dict[str, Any] | None, groups: dict[str, Any], group_floors: dict[str, Any]
+) -> dict[str, Any]:
+    """The floor test for *unit*: the sweep-wide floor, then each batch group's own floor.
+
+    The sweep-wide floor judges the best numbers of the whole sweep (across every group of a
+    batch); a group's floor (min_mbps or min_iops in --groups) judges that group's numbers only,
+    so a batch passes a floor only when every group that sets one meets it. When groups set
+    floors for *unit* and the sweep-wide floor is 0 (none), only the group verdicts are reported.
+    """
+    tests = []
+    if floor or not any(unit in floors for floors in group_floors.values()):
+        tests.append(_floor_test(_slowest(best, unit), floor, unit, _headline(best or {})))
+    for gid, floors in sorted(group_floors.items()):
+        if unit in floors:
+            test = _floor_test(_slowest(groups.get(gid), unit), floors[unit], unit, _headline(groups.get(gid) or {}))
+            tests.append({k: f"group {gid}: {v}" if k in ("message", "error") else v for k, v in test.items()})
+    if len(tests) == 1:
+        return tests[0]
+    passed = all(t["passed"] for t in tests)
+    text = "; ".join(t.get("message") or t["error"] for t in tests if passed or not t["passed"])
+    return {"passed": True, "message": text} if passed else {"passed": False, "error": text}
+
+
+def _group_floors(run: dict[str, Any]) -> dict[str, dict[str, float]]:
+    """Each batch group's own floors, by group ID, from the run step's ``groups``: {gid: {unit: floor}}."""
+    found: dict[str, dict[str, float]] = {}
+    for group in run.get("groups") or []:
+        if not isinstance(group, dict) or not group.get("group_id"):
+            continue
+        floors = {
+            unit: float(group[setting])
+            for unit, setting in (("mbps", "min_mbps"), ("iops", "min_iops"))
+            if isinstance(group.get(setting), (int, float)) and not isinstance(group.get(setting), bool)
+        }
+        if floors:
+            found[str(group["group_id"])] = floors
+    return found
+
+
 def _result(
     run: dict[str, Any],
     best: dict[str, Any],
@@ -304,26 +364,33 @@ def _result(
     results_error: str | None,
     min_mbps: float,
     min_iops: float,
+    groups: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the step result from the run step's output and the best numbers of *executions* executions."""
+    """Build the step result from the run step's output and the best numbers of *executions* executions.
+
+    *groups* is each batch group's best numbers by group ID. A batch (the run step reports
+    ``groups``) is reported and summarised per group, since a headline across groups mixes
+    workloads. The floors judge whatever results there are, even when some are missing
+    (results_present fails then): a group that ran still meets or misses its own floor.
+    """
     headline = _headline(best)
+    groups = groups or {}
+    batch = bool(run.get("groups")) or len(groups) > 1
+    plural = "" if executions == 1 else "s"
     if results_error:
         results_present: dict[str, Any] = {"passed": False, "error": results_error}
-        slowest_mbps = slowest_iops = None
+    elif batch:
+        summary = " | ".join(f"group {gid}: {_summary(_headline(b))}" for gid, b in sorted(groups.items()))
+        message = f"{executions} execution{plural} complete in {len(groups)} group{'' if len(groups) == 1 else 's'}: {summary}"
+        results_present = {"passed": True, "message": message}
     else:
-        summary = "; ".join(
-            f"{op} {n['best_mbps']} MB/s, {n['best_iops']} IOPS, {n['min_avg_latency_ms']} ms avg latency"
-            for op, n in headline.items()
-        )
-        plural = "" if executions == 1 else "s"
-        results_present = {"passed": True, "message": f"{executions} execution{plural} complete: {summary}"}
-        slowest_mbps = min(best[op]["best_mbps"] for op in OPERATIONS)
-        slowest_iops = min(best[op]["best_iops"] for op in OPERATIONS)
+        results_present = {"passed": True, "message": f"{executions} execution{plural} complete: {_summary(headline)}"}
+    group_floors = _group_floors(run)
     tests = {
         "sweep_completed": _sweep_completed(run),
         "results_present": results_present,
-        "bandwidth_meets_min": _floor_test(slowest_mbps, min_mbps, "mbps", headline),
-        "iops_meets_min": _floor_test(slowest_iops, min_iops, "iops", headline),
+        "bandwidth_meets_min": _floors_test("mbps", min_mbps, best, groups, group_floors),
+        "iops_meets_min": _floors_test("iops", min_iops, best, groups, group_floors),
     }
     result: dict[str, Any] = {
         "success": all(t["passed"] for t in tests.values()),
@@ -332,6 +399,8 @@ def _result(
         "headline": headline,
         "tests": tests,
     }
+    if batch:
+        result["groups"] = {gid: _headline(b) for gid, b in sorted(groups.items())}
     if not result["success"]:
         failed = ", ".join(name for name, test in tests.items() if not test["passed"])
         result["error"] = f"failed: {failed}; investigate {run.get('results_dir') or 'the run step log'}"
@@ -348,7 +417,15 @@ def _evaluate(
     """Build the evaluation result from the run step's output and the results document."""
     best = _best(document)
     error = _results_error(document, best, report_error)
-    return _result(run, best, len(_io_executions(document)), error, min_mbps, min_iops)
+    return _result(run, best, len(_io_executions(document)), error, min_mbps, min_iops, _group_best(document))
+
+
+def _group_best(document: dict[str, Any] | None) -> dict[str, Any]:
+    """Each batch group's best numbers (_best), by group ID; a group with no IO execution is left out."""
+    by_group: dict[str, list[dict[str, Any]]] = {}
+    for execution in _io_executions(document):
+        by_group.setdefault(str(execution.get("group_id")), []).append(execution)
+    return {gid: _best({"executions": executions}) for gid, executions in by_group.items()}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -364,7 +441,10 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(run, dict):
         return sst.emit({**failure, "error": f"--run is not a JSON object: {args.run}"})
     document, report_error = None, "the run step reported no results_dir"
-    if run.get("results_dir"):
+    if run.get("state") == NOT_SUBMITTED:
+        # Rejected before it ran (bad input, say): a batch's draft directory has nothing to report.
+        report_error = "nothing ran: the run step rejected the sweep before submitting it"
+    elif run.get("results_dir"):
         timeout = _extract_timeout(args.extract_timeout, run)
         # The extractor holds nothing in the cluster, so an interrupt needs no teardown hint.
         restore = sst.install_interrupt_handler(hint=None)

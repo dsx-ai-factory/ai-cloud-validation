@@ -65,16 +65,18 @@ sweep from submit to release.
 | Phase | Step | Does |
 |---|---|---|
 | setup | `setup_cluster` | Provider: inventories the cluster; may also report its kubeconfig and the claim and nodes to use (`storage_perf`) |
+| test | `preflight_storage_test` | Runs storage-scale-test's `validate_env.sh` for the claim and nodes; when it fails, the test phase stops and the sweep does not run |
 | test | `run_storage_test` | Submits the sweep, waits for it, collects it |
 | test | `evaluate_storage_test` | Reads the results and compares them with the floors |
 | teardown | `release_storage_test` | Releases every sweep under the results root that still holds cluster resources |
 | teardown | `teardown_cluster` | Provider: removes what setup created (nothing, as shipped) |
 
-Two checks: the sweep test, with a subtest per stage, and a teardown check that the
-sweep was released, which happens in teardown, a later phase.
+Three checks: the preflight, the sweep test with a subtest per stage, and a teardown
+check that the sweep was released, which happens in teardown, a later phase.
 
 | Check | Test ID | Step | Passes when |
 |---|---|---|---|
+| `StoragePerfPreflightCheck` | `N/A` (before the sweep) | `preflight_storage_test` | `validate_env.sh` passed: each claim is Bound, the selector matches Ready nodes, and a short validation Job could pull the image and write, read and remove on the claim's test directory as the workload's UID/GID. On failure it reports `validate_env.sh`'s errors |
 | `StoragePerfSweepCheck` | `HSS02-02` | `evaluate_storage_test` | All four subtests pass: `sweep_completed` (the run step finished the sweep with state `SUCCESS`), `results_present` (`batch_outcome.complete` is true, with write and read numbers), `bandwidth_meets_min` (`perf_min_mbps`) and `iops_meets_min` (`perf_min_iops`). A floor of `0` is no floor: that subtest passes and only reports the measured numbers |
 | `StoragePerfSweepReleasedCheck` | `N/A` (teardown) | `release_storage_test` | No sweep still holds cluster resources |
 
@@ -131,6 +133,7 @@ variable.
 | `perf_wait_timeout_s` | `auto` | How long `run_storage_test` waits for the sweep: `auto` or seconds, at most 12 h; see [Time limits](#time-limits) |
 | `perf_live_interval_ms` | `1000` | elbencho's live statistics interval; its per-interval CSVs feed storage-scale-test's own reports and are what grows a collect |
 | `perf_min_mbps`, `perf_min_iops` | `0` | Floors; `0` (or empty) is no floor: that subtest only reports the measured numbers |
+| `perf_groups` | empty | Several workloads in one run, as a storage-scale-test batch; see [Batches](#batches). Empty runs one sweep from the settings above |
 
 storage-scale-test checks these values itself before it touches the cluster; a bad
 one is rejected (`NOT_SUBMITTED`) with its errors, which name its own variables
@@ -147,6 +150,35 @@ sweeps, storage-scale-test's
 [BENCHMARK_RECIPES_FILESYSTEM.md](https://github.com/NVIDIA/storage-scale-test/blob/v2.1.0/BENCHMARK_RECIPES_FILESYSTEM.md)
 has ready-made shapes, starting with its quick validation recipe.
 
+### Batches
+
+`perf_groups` runs several workloads in one run: a list of groups, each with any
+of `nodes`, `io_sizes`, `threads`, `iodepth` and `duration`. A key a group leaves
+out (or sets to null) takes the `perf_*` setting of the same name. Give it in the
+provider config:
+
+```yaml
+tests:
+  settings:
+    perf_groups:
+      - {io_sizes: "r4K", min_iops: 1000}
+      - {io_sizes: "1M", threads: "1,2", nodes: "1,2", min_mbps: 500}
+```
+
+or per run as JSON:
+`--set 'tests.settings.perf_groups=[{"io_sizes": "r4K"}, {"io_sizes": "1M", "threads": "2"}]'`.
+
+`run_storage_test` writes one workload file per group and runs them as one
+storage-scale-test
+[prepared batch](https://github.com/NVIDIA/storage-scale-test/blob/v2.1.0/docs/FILESYSTEM_TESTING.md#prepared-filesystem-batches):
+`--batch` with the first group, `--append` for each further one (1 to 20 groups),
+then `--start`. The groups run one after another in one attempt on the same claim
+and nodes. The batch stops at its first failed execution, so later groups do not
+run; a rerun starts a new batch with every group. An unknown key, or a `duration`
+or floor that is not a usable number, is rejected before anything is submitted;
+storage-scale-test rejects any other bad value itself, also before it touches the
+cluster.
+
 ### Floors
 
 `evaluate_storage_test` reports a headline per operation: the best bandwidth
@@ -155,6 +187,13 @@ latency. The floor checks compare the slower operation's best result with
 `perf_min_mbps` and `perf_min_iops`. A floor of `0` is no floor: that check
 passes and only reports the numbers. Set floors from your own expectations for the sweep you configure: a
 small random IO size gives far higher IOPS and far lower bandwidth than 1M.
+
+In a batch, `perf_min_mbps` and `perf_min_iops` judge the best numbers across all
+groups, which can come from different groups (one group's MB/s, another's IOPS).
+To judge each workload on its own, give the group its own `min_mbps` or `min_iops`
+(see [Batches](#batches)): the floor check then also needs that group's slower
+operation to meet it. The evaluate step's output reports each group's headline
+under `groups`, and `results_present` summarises each group separately.
 
 ### Time limits
 
@@ -231,13 +270,16 @@ that resolution. Collecting took under 2 min; `evaluate_storage_test` took about
 ## Locks and unreleased sweeps
 
 Each sweep's lifecycle lives in its own sweep directory
-(`_output/storage-perf/results/elbencho-<UTC timestamp>/`), and the teardown step
+(`_output/storage-perf/results/elbencho-<UTC timestamp>/`, or
+`filesystem-batch-<UTC timestamp>/` for a [batch](#batches)), and the teardown step
 reads it with `--status`. A sweep holds nothing once it is collected
 (`RESULT_COLLECTION=COMPLETE`) or rolled back (`SUBMISSION_FAILED`), or when
 submit stopped before it created anything (no `kubernetes/current-attempt`). Any
 other sweep, including one whose status cannot be read, is unreleased: it may
 still hold the claim. `release_storage_test` cancels and collects every
-unreleased sweep under the results root, not just this run's. A collected sweep
+unreleased sweep under the results root, not just this run's, oldest first. A
+status it cannot read is asked again a few times before that sweep is left for a
+later teardown. A collected sweep
 answers from its own files; any other costs one status check against the
 cluster, until you remove its directory.
 
@@ -262,9 +304,9 @@ start each run from its own directory.
 
 Runs from different directories may share a storage-scale-test checkout: the
 launcher reads its settings from `env.sh` in the checkout root, so each run holds
-the checkout's lock while it writes `env.sh` and submits. It waits for another
-run's submit for up to one submit's time (about 10 min), then fails with
-`REFUSED`.
+the checkout's lock while it writes `env.sh` and submits (for a batch: `--batch`,
+each `--append` and `--start`). It waits for another run's submit for up to the
+time the largest batch could take, then fails with `REFUSED`.
 
 ## Results
 
@@ -276,6 +318,8 @@ Each run writes under `_output/storage-perf/` in the directory isvctl runs from:
   [MACHINE_READABLE_RESULTS.md](https://github.com/NVIDIA/storage-scale-test/blob/v2.1.0/docs/MACHINE_READABLE_RESULTS.md),
   including its jq spot checks). `evaluate_storage_test` passes `results_present`
   only when the document's own `batch_outcome.complete` is true.
+- `results/filesystem-batch-<UTC timestamp>/` is a [batch](#batches) directory: one
+  `groups/<id>/` per group, and the document under `reports/results.json`.
 - `results/` also holds the generated target and workload files, the progress
   logs (`run-logs/`) and the steps' lock file (`.lock`).
 

@@ -47,7 +47,7 @@ from ..conftest import ISVCTL_ROOT
 
 PERF_DIR = ISVCTL_ROOT / "configs" / "shared" / "storage" / "perf"
 VENDORED = ISVCTL_ROOT.parent / "isvtest" / "vendor" / "storage-scale-test"
-STEPS = ("run_storage_test", "release_storage_test", "evaluate_storage_test")
+STEPS = ("preflight_storage_test", "run_storage_test", "release_storage_test", "evaluate_storage_test")
 
 
 def _load_steps() -> dict[str, ModuleType]:
@@ -178,6 +178,9 @@ class FakeLauncher:
         self.envs: list[dict[str, str]] = []
         self.sweep_dirs: list[Path] = []
         self.extractor: Any = None
+        self.batch_fails = ""
+        self.batch_groups = 0
+        self.on_call: Any = None
         self._start_sweep()
 
     def _start_sweep(self) -> None:
@@ -200,6 +203,8 @@ class FakeLauncher:
     def __call__(self, cmd: list[str], timeout: float, env: dict[str, str] | None = None) -> Any:
         """Answer one sst.run call."""
         if cmd[0] == str(self.base / SST.LAUNCHER):
+            if self.on_call is not None:
+                self.on_call(cmd[1:])
             self.calls.append(" ".join(cmd[1:]))
             self.envs.append(env or {})
             return self._launcher(cmd[1:])
@@ -275,7 +280,14 @@ class FakeLauncher:
         return ran()
 
     def submit(self, args: list[str]) -> Any:
-        """Submit: a new sweep in a new sweep directory, with its current-attempt file."""
+        """Submit: a new sweep in a new sweep directory, with its current-attempt file.
+
+        ``--batch`` makes a draft batch directory (no current attempt yet), ``--append`` adds a
+        group to it, and ``--start`` starts it like a submit; ``batch_fails`` names one of the
+        three to fail.
+        """
+        if args[0] in ("--batch", "--append", "--start"):
+            return self._batch(args)
         assert args[0::2] == ["--target", "--env-override", "--nodes"], args
         assert Path(args[1]).is_file() and Path(args[3]).is_file(), args
         if self.sweep_dirs and self.collected:
@@ -284,6 +296,28 @@ class FakeLauncher:
         sweep_dir = left_behind(self.base, f"elbencho-20260101Z{len(self.sweep_dirs):06d}")
         self.sweep_dirs.append(sweep_dir)
         return ran(stdout=f"STORAGE_SCALE_TEST_RESULTS_DIR={sweep_dir}\nSTORAGE_SCALE_TEST_ATTEMPT_ID={ATTEMPT}\n")
+
+    def _batch(self, args: list[str]) -> Any:
+        """``--batch``, ``--append`` or ``--start``, as storage-scale-test answers them."""
+        operation = args[0]
+        if operation == self.batch_fails:
+            return ran(1, stderr=f"Error: {operation} failed\n")
+        if operation == "--batch":
+            assert args[1::2] == ["--target", "--env-override", "--nodes"], args
+            batch_dir = self.base / "results" / f"filesystem-batch-20260101Z{len(self.sweep_dirs):06d}"
+            batch_dir.mkdir(parents=True)
+            self.sweep_dirs.append(batch_dir)
+            self.batch_groups = 1
+            return ran(stdout=f"{SST.BATCH_RESULTS_KEY}={batch_dir}\n{SST.BATCH_GROUP_KEY}=0001\n")
+        if operation == "--append":
+            assert args[2::2] == ["--target", "--env-override", "--nodes"], args
+            assert Path(args[1]) == self.sweep_dirs[-1], args
+            self.batch_groups += 1
+            return ran(stdout=f"{SST.BATCH_RESULTS_KEY}={args[1]}\n{SST.BATCH_GROUP_KEY}={self.batch_groups:04d}\n")
+        assert args == ["--start", str(self.sweep_dirs[-1])], args
+        self._start_sweep()
+        left_behind(self.base, self.sweep_dirs[-1].name)
+        return ran(stdout=f"STORAGE_SCALE_TEST_RESULTS_DIR={args[1]}\nSTORAGE_SCALE_TEST_ATTEMPT_ID={ATTEMPT}\n")
 
 
 class FakeClock:

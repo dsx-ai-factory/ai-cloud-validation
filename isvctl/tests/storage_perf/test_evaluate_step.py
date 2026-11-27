@@ -237,6 +237,33 @@ def test_evaluate_reads_the_document_the_extractor_writes(
     assert seen == [[str(tmp_path), "--to-json", "--live-detail", "none"]]
 
 
+def test_evaluate_reads_a_batch_document_from_its_reports_directory(
+    perf: InProcess, launcher: FakeLauncher, tmp_path: Path
+) -> None:
+    """For a batch, the extractor writes reports/results.json; a stale one there is removed first."""
+    batch_dir = tmp_path / "filesystem-batch-20260101Z000000"
+    (batch_dir / EVALUATE.BATCH_REPORTS).mkdir(parents=True)
+    (batch_dir / EVALUATE.BATCH_MANIFEST).write_text("")
+    stale = batch_dir / EVALUATE.BATCH_REPORTS / "results.json"
+    stale.write_text(json.dumps(document()))
+    groups = document(
+        execution(write=(10_000_000, 2_000), group_id="0001"), execution(write=(500_000_000, 400), group_id="0002")
+    )
+
+    def extractor(args: list[str]) -> Any:
+        """Write the batch's document where storage-scale-test does, after checking the stale one is gone."""
+        assert not stale.exists()
+        stale.write_text(json.dumps(groups))
+        return ran()
+
+    launcher.extractor = extractor
+
+    rc, out = evaluate_step(perf, launcher.base, batch_dir)
+
+    assert rc == 0, out
+    assert sorted(out["groups"]) == ["0001", "0002"]
+
+
 @pytest.mark.parametrize(
     ("written", "error"),
     [
@@ -317,3 +344,146 @@ def test_evaluate_scales_its_extract_timeout_with_the_cells(
     assert out["tests"]["results_present"]["error"] == (
         f"extractor timed out after {expected}s; rerun it offline: /sst/utils/extract-elbencho.py /r/elbencho-x --to-json --live-detail none"
     )
+
+
+def test_evaluate_reports_each_batch_group_and_floors_the_best() -> None:
+    """A batch's groups run different workloads: each gets its own headline; floors use the best."""
+    doc = document(
+        execution(write=(10_000_000, 2_000), group_id="0001"),
+        execution(write=(500_000_000, 400), read=(600_000_000, 500), group_id="0002"),
+    )
+
+    out = EVALUATE._evaluate(RUN_OK, doc, 0.0, 0.0)
+
+    assert out["success"] is True
+    assert out["groups"]["0001"]["write"] == {
+        "samples": 1,
+        "best_mbps": 10.0,
+        "best_iops": 2000.0,
+        "min_avg_latency_ms": 5.0,
+    }
+    assert out["groups"]["0002"]["read"]["best_mbps"] == 600.0
+    assert out["headline"]["write"]["best_mbps"] == 500.0 and out["headline"]["write"]["best_iops"] == 2000.0
+    assert_schema("evaluate_storage_test", out)
+
+
+def test_evaluate_leaves_out_groups_for_a_single_sweep() -> None:
+    """A plain sweep (one group) reports only its headline."""
+    assert "groups" not in EVALUATE._evaluate(RUN_OK, document(execution(write=(1, 1), group_id="0001")), 0.0, 0.0)
+
+
+def _two_groups() -> dict[str, Any]:
+    """A batch document: a small-IO group (0001) and a large-IO group (0002)."""
+    return document(
+        execution(write=(10_000_000, 2_000), read=(20_000_000, 3_000), group_id="0001"),
+        execution(write=(500_000_000, 400), read=(600_000_000, 500), group_id="0002"),
+    )
+
+
+def test_a_batch_summarises_each_group_not_a_mix_of_them() -> None:
+    """results_present names each group's own numbers; a line across groups would pair one
+    group's MB/s with another's IOPS."""
+    out = EVALUATE._evaluate(RUN_OK, _two_groups(), 0.0, 0.0)
+
+    assert out["tests"]["results_present"]["message"] == (
+        "2 executions complete in 2 groups: "
+        "group 0001: write 10.0 MB/s, 2000.0 IOPS, 5.0 ms avg latency; read 20.0 MB/s, 3000.0 IOPS, 4.0 ms avg latency"
+        " | group 0002: write 500.0 MB/s, 400.0 IOPS, 5.0 ms avg latency; read 600.0 MB/s, 500.0 IOPS, 4.0 ms avg latency"
+    )
+
+
+def test_a_group_floor_judges_that_group_only() -> None:
+    """Group floors from the run step: 0001 meets its IOPS floor; 0002 misses its bandwidth floor,
+    though the sweep-wide numbers (0002's MB/s with 0001's IOPS) would meet both."""
+    run = {
+        **RUN_OK,
+        "groups": [
+            {"group_id": "0001", "io_sizes": "r4K", "min_iops": 1000.0},
+            {"group_id": "0002", "io_sizes": "1M", "min_mbps": 550.0},
+        ],
+    }
+
+    out = EVALUATE._evaluate(run, _two_groups(), 0.0, 0.0)
+
+    assert out["success"] is False
+    assert out["tests"]["bandwidth_meets_min"] == {
+        "passed": False,
+        "error": "group 0002: 500.0 MB/s < floor 550.0 MB/s",
+    }
+    assert out["tests"]["iops_meets_min"] == {
+        "passed": True,
+        "message": "group 0001: 2000.0 IOPS >= floor 1000.0 IOPS (write 2000.0 IOPS, read 3000.0 IOPS)",
+    }
+    assert_schema("evaluate_storage_test", out)
+
+
+def test_a_group_floor_without_results_fails() -> None:
+    """A group that set a floor but has no results (it never ran) cannot pass it."""
+    run = {**RUN_OK, "groups": [{"group_id": "0001"}, {"group_id": "0002", "min_mbps": 1.0}]}
+    doc = document(execution(write=(10_000_000, 2_000), group_id="0001"))
+
+    out = EVALUATE._evaluate(run, doc, 0.0, 0.0)
+
+    assert out["tests"]["bandwidth_meets_min"] == {"passed": False, "error": "group 0002: no measurement to compare"}
+
+
+def test_evaluate_does_not_extract_a_run_that_was_never_submitted(
+    perf: InProcess, launcher: FakeLauncher, tmp_path: Path
+) -> None:
+    """A run rejected before it ran (bad input) fails fast: its draft directory is not extracted."""
+
+    def extractor(args: list[str]) -> Any:
+        """Never called."""
+        raise AssertionError(f"extracted {args}")
+
+    launcher.extractor = extractor
+    run = json.dumps({"success": False, "state": "NOT_SUBMITTED", "results_dir": str(tmp_path), "error": "bad"})
+
+    rc, out = perf("evaluate_storage_test", f"--scale-test-base={launcher.base}", f"--run={run}")
+
+    assert rc == 1
+    assert out["tests"]["results_present"] == {
+        "passed": False,
+        "error": "nothing ran: the run step rejected the sweep before submitting it",
+    }
+
+
+def test_a_sweep_wide_floor_is_reported_with_the_group_floors() -> None:
+    """With perf_min_iops set too, the IOPS check reports the sweep-wide verdict, then each group's."""
+    run = {**RUN_OK, "groups": [{"group_id": "0001", "min_iops": 1000.0}, {"group_id": "0002"}]}
+
+    out = EVALUATE._evaluate(run, _two_groups(), 0.0, 400.0)
+
+    assert out["tests"]["iops_meets_min"]["message"] == (
+        "2000.0 IOPS >= floor 400.0 IOPS (write 2000.0 IOPS, read 3000.0 IOPS); "
+        "group 0001: 2000.0 IOPS >= floor 1000.0 IOPS (write 2000.0 IOPS, read 3000.0 IOPS)"
+    )
+
+
+def test_group_floors_judge_the_groups_that_ran_when_another_failed() -> None:
+    """A batch that stopped at group 0002: results_present fails, but group 0001 still meets or
+    misses its own floor, and 0002, which has no results, cannot pass its floor."""
+    failed = {**execution(write=(1, 1), group_id="0002"), "ledger_state": "failed", "result_state": "not_run"}
+    failed["results"] = None
+    doc = document(execution(write=(10_000_000, 2_000), read=(20_000_000, 3_000), group_id="0001"), failed)
+    run = {**RUN_OK, "groups": [{"group_id": "0001", "min_iops": 1000.0}, {"group_id": "0002", "min_mbps": 1.0}]}
+
+    out = EVALUATE._evaluate(run, doc, 0.0, 0.0)
+
+    assert out["tests"]["results_present"]["passed"] is False
+    assert out["tests"]["iops_meets_min"] == {
+        "passed": True,
+        "message": "group 0001: 2000.0 IOPS >= floor 1000.0 IOPS (write 2000.0 IOPS, read 3000.0 IOPS)",
+    }
+    assert out["tests"]["bandwidth_meets_min"] == {"passed": False, "error": "group 0002: no measurement to compare"}
+    assert out["groups"]["0001"]["write"]["best_iops"] == 2000.0
+
+
+def test_a_one_group_batch_is_reported_per_group() -> None:
+    """A batch of one group still reports its group, like a batch of several."""
+    run = {**RUN_OK, "groups": [{"group_id": "0001", "io_sizes": "r4K"}]}
+
+    out = EVALUATE._evaluate(run, document(execution(write=(10_000_000, 2_000), group_id="0001")), 0.0, 0.0)
+
+    assert sorted(out["groups"]) == ["0001"]
+    assert out["tests"]["results_present"]["message"].startswith("1 execution complete in 1 group: group 0001: ")

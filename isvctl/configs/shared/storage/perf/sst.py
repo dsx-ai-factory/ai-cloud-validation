@@ -43,6 +43,9 @@ from typing import Any
 DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
 
 LAUNCHER = Path("storage-tests") / "fs" / "nv-elbencho-sweep.sh"
+VALIDATE_ENV = Path("validate_env.sh")
+# The directory inside the claim the sweep writes under.
+TEST_PATH = "scale-test"
 EXTRACTOR = Path("utils") / "extract-elbencho.py"
 # The pinned release `make vendor-storage-scale-test` (or `make vendor`) extracts.
 VENDORED = Path(__file__).resolve().parents[5] / "isvtest" / "vendor" / "storage-scale-test"
@@ -67,6 +70,12 @@ SUBMISSION_FAILED = "SUBMISSION_FAILED"
 # Submit publishes this pointer before it changes anything in the cluster, so a sweep
 # directory without it owns no cluster resource (and --status cannot inspect it).
 CURRENT_ATTEMPT = Path("kubernetes") / "current-attempt"
+# What --batch and --append print the batch directory as.
+BATCH_RESULTS_KEY = "STORAGE_SCALE_TEST_BATCH_RESULTS"
+# What --batch and --append print the group they added as.
+BATCH_GROUP_KEY = "STORAGE_SCALE_TEST_BATCH_GROUP"
+# The names storage-scale-test gives a plain IO sweep's directory and a batch's.
+SWEEP_PREFIXES = ("elbencho-", "filesystem-batch-")
 # Every lifecycle command holds the sweep directory's lock (flock -n), and a concurrent
 # one is refused with this message; storage-scale-test's answer is to wait and retry.
 LOCK_BUSY = "another Kubernetes lifecycle operation is active"
@@ -492,14 +501,19 @@ def count_cells(nodes: str, io_sizes: list[str], threads: list[str], iodepths: l
     return count_node_counts(nodes) * len(io_sizes) * len(threads) * len(iodepths)
 
 
-def estimate_s(cells: int, duration_s: int) -> int:
-    """Seconds from submit until the run notices a sweep of *cells* cells has finished."""
-    return FIXED_OVERHEAD_S + cells * (2 * duration_s + PER_CELL_OVERHEAD_S)
+def estimate_s(groups: list[tuple[int, int]]) -> int:
+    """Seconds from submit until the run notices a sweep has finished.
+
+    *groups* is ``(cells, phase duration in seconds)`` per group: one for a plain sweep, one per
+    group of a batch. A batch's groups run back to back in one attempt, so it pays the fixed
+    overhead once.
+    """
+    return FIXED_OVERHEAD_S + sum(cells * (2 * duration_s + PER_CELL_OVERHEAD_S) for cells, duration_s in groups)
 
 
-def auto_wait_s(cells: int, duration_s: int) -> int:
-    """The automatic wait for a sweep of *cells* cells, between WAIT_FLOOR_S and WAIT_CAP_S."""
-    return min(WAIT_CAP_S, max(WAIT_FLOOR_S, int(SAFETY * estimate_s(cells, duration_s))))
+def auto_wait_s(estimate: int) -> int:
+    """The automatic wait for a sweep estimated at *estimate* seconds, between WAIT_FLOOR_S and WAIT_CAP_S."""
+    return min(WAIT_CAP_S, max(WAIT_FLOOR_S, int(SAFETY * estimate)))
 
 
 def wait_for_terminal(
@@ -651,6 +665,21 @@ def install_env_sh(base: Path, settings: list[str]) -> Path:
     return path
 
 
+def env_settings(results_dir: str, node_selector: str) -> list[str]:
+    """The env.sh settings isvctl owns: substrate, results location and Pod placement."""
+    return [
+        "export EXECUTION_SUBSTRATE=kubectl",
+        f"export RESULTS_DIR={bash_quote(results_dir)}",
+        f"export LOGS_DIR={bash_quote(str(Path(results_dir) / 'logs'))}",
+        f"export KUBECTL_NODE_SELECTOR={bash_quote(node_selector)}",
+    ]
+
+
+def test_dirs(claim: str) -> str:
+    """The TEST_DIRS assignment for *claim* (namespace/claim): its scale-test directory, weight 1."""
+    return f"TEST_DIRS=([{bash_quote(f'{claim}:{TEST_PATH}')}]=1)"
+
+
 def bash_quote(value: str) -> str:
     """Single-quote a value for Bash."""
     return "'" + value.replace("'", "'\\''") + "'"
@@ -718,7 +747,10 @@ def unreleased(base: Path, results_root: str, env: dict[str, str]) -> list[tuple
     """
     found = []
     # iterdir, not glob: glob hides a directory it cannot list, which would read as nothing held.
-    for path in sorted(p for p in Path(results_root).iterdir() if p.name.startswith("elbencho-")):
+    # Oldest first by the UTC datestamp both kinds of directory end with (elbencho-<ds>,
+    # filesystem-batch-<ds>), so plain sweeps and batches interleave in the order they ran.
+    held = (p for p in Path(results_root).iterdir() if p.name.startswith(SWEEP_PREFIXES))
+    for path in sorted(held, key=lambda p: (p.name.rsplit("-", 1)[-1], p.name)):
         if not (path / CURRENT_ATTEMPT).is_file():
             continue
         kind, status = query(base, str(path), env, lock_window_s=LOCK_WINDOW_S)
