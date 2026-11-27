@@ -146,12 +146,15 @@ class Probe:
     def service(self, name: str, selector: str, port: int, target: int, **spec: Any) -> dict[str, Any]:
         """Create a fresh Service and observe the API-assigned fields."""
         annotations = spec.pop("annotations", {})
+        # Some LoadBalancer implementations select Services by label (for example
+        # a MetalLB IPAddressPool serviceSelector), so labels are passed through.
+        labels = spec.pop("labels", {})
         protocol = spec.pop("protocol", "TCP")
         self.create(
             {
                 "apiVersion": "v1",
                 "kind": "Service",
-                "metadata": {"name": name, "namespace": self.namespace, "annotations": annotations},
+                "metadata": {"name": name, "namespace": self.namespace, "annotations": annotations, "labels": labels},
                 "spec": {
                     "selector": {"app": selector},
                     "ports": [{"port": port, "targetPort": target, "protocol": protocol}],
@@ -185,8 +188,15 @@ class Probe:
         for ip in static:
             ipaddress.ip_address(ip)
         for mode in modes.values():
-            if not isinstance(mode, dict) or set(mode) - {"annotations", "loadBalancerClass", "loadBalancerIP"}:
-                raise ValueError("Service settings support annotations, loadBalancerClass and loadBalancerIP only")
+            if not isinstance(mode, dict) or set(mode) - {
+                "annotations",
+                "labels",
+                "loadBalancerClass",
+                "loadBalancerIP",
+            }:
+                raise ValueError(
+                    "Service settings support annotations, labels, loadBalancerClass and loadBalancerIP only"
+                )
         self.begin()
         nonce = uuid.uuid4().hex
         self.pod(
